@@ -38,7 +38,7 @@ image: "$FEDORA_IMAGE"
   script:
     - ./.ci/check-abi ${LAST_ABI_BREAK} $(git rev-parse HEAD)
 
-build:
+disabled-build:
   stage: build
   except:
     variables:
@@ -49,7 +49,7 @@ build:
   <<: *build
 #  <<: *check_abi
 
-test:
+disabled-test:
   stage: test
   except:
     variables:
@@ -65,7 +65,7 @@ test:
       - _build/meson-logs
     expire_in: 1 week
 
-test_valgrind:
+disabled-test_valgrind:
   stage: test
   except:
     variables:
@@ -85,13 +85,13 @@ test_indent:
 
 .flatpak_script_template: &flatpak_script
     script:
-        - flatpak-builder --stop-at=${FLATPAK_MODULE} app ${MANIFEST_PATH}
+        - flatpak-builder --user --disable-rofiles-fuse --stop-at=${FLATPAK_MODULE} app ${MANIFEST_PATH}
         # Make sure to keep this in sync with the Flatpak manifest, all arguments
         # are passed except the config-args because we build it ourselves
         - flatpak build app meson --prefix=/app --libdir=lib ${MESON_ARGS} _build
         - flatpak build app ninja -C _build install
         - flatpak build app rm -rf /app/include/ /app/lib/pkgconfig/
-        - flatpak-builder --finish-only --repo=repo app ${MANIFEST_PATH}
+        - flatpak-builder --user --disable-rofiles-fuse --finish-only --repo=repo app ${MANIFEST_PATH}
         # Generate a Flatpak bundle
         - flatpak build-bundle repo ${BUNDLE} --runtime-repo=${RUNTIME_REPO} ${DBUS_ID}
 
@@ -107,7 +107,7 @@ test_indent:
     <<: *flatpak_artifacts
 
 .flatpak_master_template: &flatpak_master
-    image: registry.gitlab.gnome.org/gnome/gnome-runtime-images/gnome:3.32
+    image: registry.gitlab.gnome.org/gnome/gnome-runtime-images/gnome:3.36
     stage: flatpak
     variables:
         MANIFEST_PATH: "demo/org.freedesktop.libfprint.Demo.json"

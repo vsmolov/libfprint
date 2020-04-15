@@ -1,7 +1,7 @@
 {
     "app-id": "org.freedesktop.libfprint.Demo",
     "runtime": "org.gnome.Platform",
-    "runtime-version": "3.32",
+    "runtime-version": "3.36",
     "sdk": "org.gnome.Sdk",
     "command": "gtk-libfprint-test",
     "finish-args": [
@@ -45,7 +45,7 @@
                     "url": "https://github.com/hughsie/libgusb/archive/0.3.0.tar.gz",
                     "sha256": "b36310f8405d5fd68f6caf4a829f7ab4c627b38fd3d02a139d411fce0f3a49f1"
                 }
-            ]
+           ]
         },
         {
             "name": "libfprint",
@@ -55,7 +55,7 @@
                 {
                     "type": "git",
                     "url": "https://gitlab.freedesktop.org/libfprint/libfprint.git",
-                    "branch": "wip/benzea/v2"
+                    "branch": "master"
                 }
             ]
         }
