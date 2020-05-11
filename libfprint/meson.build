@@ -4,6 +4,7 @@ libfprint_sources = [
     'fp-image.c',
     'fp-print.c',
     'fp-image-device.c',
+    'fp-sdcp-device.c',
 ]
 
 libfprint_private_sources = [
@@ -15,6 +16,7 @@ libfprint_private_sources = [
     'fpi-image.c',
     'fpi-print.c',
     'fpi-ssm.c',
+    'fpi-sdcp-device.c',
     'fpi-usb-transfer.c',
 ]
 
@@ -24,6 +26,7 @@ libfprint_public_headers = [
     'fp-image-device.h',
     'fp-image.h',
     'fp-print.h',
+    'fp-sdcp-device.h',
 ]
 
 libfprint_private_headers = [
@@ -39,6 +42,7 @@ libfprint_private_headers = [
     'fpi-log.h',
     'fpi-minutiae.h',
     'fpi-print.h',
+    'fpi-sdcp-device.h',
     'fpi-usb-transfer.h',
     'fpi-ssm.h',
 ]
