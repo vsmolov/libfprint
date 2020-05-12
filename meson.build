@@ -32,6 +32,7 @@ common_cflags = cc.get_supported_arguments([
     '-Wmissing-include-dirs',
     '-Wmissing-noreturn',
     '-Wpointer-arith',
+    '-Wstringop-overflow',
     '-Wshadow',
     '-Wtype-limits',
     '-Wundef',
