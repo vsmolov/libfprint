@@ -88,7 +88,10 @@ cairo_dep = dependency('cairo', required: false)
 
 # Drivers
 drivers = get_option('drivers').split(',')
-virtual_drivers = [ 'virtual_image' ]
+virtual_drivers = [
+    'virtual_image',
+    'virtual_sdcp',
+]
 default_drivers = [
     'upektc_img',
     'vfs5011',
