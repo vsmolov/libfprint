@@ -102,6 +102,7 @@ default_drivers = [
     'vfs101',
     'vfs301',
     'vfs0050',
+    'vfs0097',
     'etes603',
     'vcom5s',
     'synaptics',

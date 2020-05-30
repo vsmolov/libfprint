@@ -149,6 +149,9 @@ foreach driver: drivers
     if driver == 'vfs0050'
         drivers_sources += [ 'drivers/vfs0050.c' ]
     endif
+    if driver == 'vfs0097'
+        drivers_sources += [ 'drivers/vfs0097/vfs0097.c' ]
+    endif
     if driver == 'elan'
         drivers_sources += [ 'drivers/elan.c' ]
     endif
