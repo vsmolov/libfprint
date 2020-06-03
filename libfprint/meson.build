@@ -212,6 +212,7 @@ deps = [
     imaging_dep,
     mathlib_dep,
     nss_dep,
+    openssl_dep
 ]
 
 # These are empty and only exist so that the include directories are created
