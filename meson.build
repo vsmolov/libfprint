@@ -128,6 +128,7 @@ if drivers.length() == 0 or drivers[0] == ''
 endif
 
 nss_dep = dependency('', required: false)
+openssl_dep = dependency('', required: false)
 imaging_dep = dependency('', required: false)
 libfprint_conf.set10('HAVE_PIXMAN', false)
 foreach driver: drivers
@@ -144,6 +145,16 @@ foreach driver: drivers
         endif
 
         libfprint_conf.set10('HAVE_PIXMAN', true)
+    endif
+    if driver == 'vfs0097'
+        nss_dep = dependency('nss', required: false)
+        if not nss_dep.found()
+            error('NSS is required for the VFS0097 driver')
+        endif
+        openssl_dep = dependency('openssl', required: false)
+        if not openssl_dep.found()
+            error('openssl is required for the VFS0097 driver')
+        endif
     endif
     if not all_drivers.contains(driver)
         error('Invalid driver \'' + driver + '\'')
