@@ -43,7 +43,7 @@
 
 G_DEFINE_TYPE (FpiDeviceVfs0097, fpi_device_vfs0097, FP_TYPE_DEVICE)
 
-void
+static void
 print_hex (const guint8 *buffer, size_t size)
 {
   char *result = g_malloc0 (size * 3 + size / 16 + 1 + 1);
@@ -114,7 +114,7 @@ async_read_callback (FpiUsbTransfer *transfer, FpDevice *device,
     }
 
   if (user_data)
-    *((gsize *) user_data) = transfer->actual_length;
+    *((guint *) user_data) = transfer->actual_length;
   fpi_ssm_next_state (transfer->ssm);
 }
 
@@ -123,8 +123,8 @@ static void
 async_read (FpiSsm   *ssm,
             FpDevice *dev,
             void     *data,
-            gsize     len,
-            gsize    *actual_length)
+            guint     len,
+            guint    *actual_length)
 {
   FpiUsbTransfer *transfer;
   GDestroyNotify free_func = NULL;
@@ -149,8 +149,8 @@ async_read (FpiSsm   *ssm,
 /* Proto functions */
 struct command_ssm_data_t
 {
-  guchar *buffer;
-  gssize  length;
+  guint8 *buffer;
+  guint   length;
 };
 
 static guint8 *
@@ -168,8 +168,8 @@ PRF_SHA256 (const guint8 *secret, guint32 secret_len,
             const guint8 *label, guint32 label_len,
             const guint8 *seed, guint32 seed_len, guint8 *out, guint32 len)
 {
-  gsize size;
-  gsize pos;
+  guint size;
+  guint pos;
   guint8 P[SHA256_DIGEST_LENGTH];
   guint8 *A;
 
@@ -217,8 +217,8 @@ PRF_SHA256 (const guint8 *secret, guint32 secret_len,
 static void
 init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 {
-  char AES_MASTER_KEY[SHA256_DIGEST_LENGTH];
-  char VALIDATION_KEY[SHA256_DIGEST_LENGTH];
+  guint8 AES_MASTER_KEY[SHA256_DIGEST_LENGTH];
+  guint8 VALIDATION_KEY[SHA256_DIGEST_LENGTH];
 
   PRF_SHA256 (PRE_KEY, G_N_ELEMENTS (PRE_KEY),
               LABEL, G_N_ELEMENTS (LABEL),
@@ -465,6 +465,34 @@ init_keys (FpDevice *dev)
     }
 }
 
+static void tls_sign_and_encrypt (guint8   content_type,
+                                  guint8   sign_key[0x20],
+                                  guint8   encryption_key[0x20],
+                                  guint8  *data,
+                                  guint    length,
+                                  guint8 **out,
+                                  guint   *out_len);
+
+static void tls_decrypt_and_validate (guint8   content_type,
+                                      guint8   validation_key[0x20],
+                                      guint8   decryption_key[0x20],
+                                      guint8  *data,
+                                      guint    length,
+                                      guint8 **out,
+                                      guint   *out_len);
+
+static void tls_create_record (guint8   content_type,
+                               guint8  *fragment,
+                               guint    length,
+                               guint8 **out,
+                               guint   *out_len);
+
+static void tls_parse_record (guint8   content_type,
+                              guint8  *fragment,
+                              guint    length,
+                              guint8 **out,
+                              guint   *out_len);
+
 /* SSM loop for exec_command */
 static void
 exec_command_ssm (FpiSsm *ssm, FpDevice *dev)
@@ -474,6 +502,25 @@ exec_command_ssm (FpiSsm *ssm, FpDevice *dev)
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
+    case EXEC_COMMAND_SM_ENCRYPT:
+      if (self->tls)
+        {
+          guint8 *raw = data->buffer;
+          guint raw_length = data->length;
+
+          guint8 *encrypted;
+          guint encrypted_length;
+
+          tls_sign_and_encrypt (CONTENT_TYPE_DATA, self->sign_key, self->encryption_key, raw, raw_length,
+                                &encrypted, &encrypted_length);
+          tls_create_record (CONTENT_TYPE_DATA, encrypted, encrypted_length, &data->buffer, &data->length);
+
+          g_free (raw);
+          g_free (encrypted);
+        }
+      fpi_ssm_next_state (ssm);
+      break;
+
     case EXEC_COMMAND_SM_WRITE:
       async_write (ssm, dev, data->buffer, data->length);
       break;
@@ -482,25 +529,58 @@ exec_command_ssm (FpiSsm *ssm, FpDevice *dev)
       async_read (ssm, dev, self->buffer, VFS_USB_BUFFER_SIZE, &self->buffer_length);
       break;
 
+    case EXEC_COMMAND_SM_DECRYPT:
+      if (self->tls)
+        {
+          guint8 *encrypted;
+          guint encrypted_length;
+
+          guint8 *raw;
+          guint raw_length;
+
+          tls_parse_record (CONTENT_TYPE_DATA, self->buffer, self->buffer_length, &encrypted, &encrypted_length);
+          tls_decrypt_and_validate (CONTENT_TYPE_DATA, self->validation_key, self->decryption_key, encrypted, encrypted_length,
+                                    &raw, &raw_length);
+
+          memcpy (self->buffer, raw, raw_length);
+          self->buffer_length = raw_length;
+
+          print_hex (self->buffer, self->buffer_length);
+
+          g_free (raw);
+          g_free (encrypted);
+        }
+      fpi_ssm_next_state (ssm);
+      break;
+
     default:
       fp_err ("Unknown EXEC_COMMAND_SM state");
       fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
     }
 }
 
+static void
+command_ssm_data_free (void *data)
+{
+  struct command_ssm_data_t *ssm_data = data;
+
+  g_free (ssm_data->buffer);
+  g_free (ssm_data);
+}
+
 /* Send command and read response */
 static void
-exec_command (FpDevice *dev, FpiSsm *ssm, const guchar *buffer, gsize length)
+exec_command (FpDevice *dev, FpiSsm *ssm, const guint8 *buffer, guint length)
 {
   struct command_ssm_data_t *data;
   FpiSsm *subsm;
 
   data = g_new0 (struct command_ssm_data_t, 1);
-  data->buffer = (guchar *) buffer;
+  data->buffer = g_memdup (buffer, length);
   data->length = length;
 
   subsm = fpi_ssm_new (dev, exec_command_ssm, EXEC_COMMAND_SM_STATES);
-  fpi_ssm_set_data (subsm, data, g_free);
+  fpi_ssm_set_data (subsm, data, command_ssm_data_free);
 
   fpi_ssm_start_subsm (ssm, subsm);
 }
@@ -640,6 +720,28 @@ tls_create_record (guint8 content_type, guint8 *fragment, guint length, guint8 *
 }
 
 static void
+tls_parse_record (guint8 content_type, guint8 *fragment, guint length, guint8 **out, guint *out_len)
+{
+  FpiByteReader reader;
+  const guint8 *data;
+  guint16 data_length;
+  guint8 type;
+
+  fpi_byte_reader_init (&reader, fragment, length);
+  fpi_byte_reader_get_uint8 (&reader, &type);
+  fpi_byte_reader_skip (&reader, G_N_ELEMENTS (TLS_VERSION));
+
+  if (type != content_type)
+    fp_warn ("Unexpected content type: %02x", type);
+
+  fpi_byte_reader_get_uint16_be (&reader, &data_length);
+  fpi_byte_reader_get_data (&reader, data_length, &data);
+
+  *out = g_memdup (data, data_length);
+  *out_len = data_length;
+}
+
+static void
 tls_sign_and_encrypt (guint8 content_type, guint8 sign_key[0x20], guint8 encryption_key[0x20],
                       guint8 *data, guint length, guint8 **out, guint *out_len)
 {
@@ -685,7 +787,7 @@ tls_sign_and_encrypt (guint8 content_type, guint8 sign_key[0x20], guint8 encrypt
       return;
     }
 
-  g_free(block);
+  g_free (block);
 
   gint pad_len = encrypted_length - (length + 0x10 + 0x20);
   if (pad_len == 0)
@@ -714,6 +816,63 @@ tls_sign_and_encrypt (guint8 content_type, guint8 sign_key[0x20], guint8 encrypt
 
   *out = encrypted;
   *out_len = 0x10 + elen1 + elen2 + elen3;
+}
+
+static void
+tls_decrypt_and_validate (guint8 content_type, guint8 validation_key[0x20], guint8 decryption_key[0x20],
+                          guint8 *data, guint length, guint8 **out, guint *out_len)
+{
+  guint8 *record;
+  guint record_length;
+  guint8 hmac[0x20];
+  guint8 iv[0x10];
+
+  guint8 *decrypted = g_malloc0 (length);
+
+  memcpy (iv, data, G_N_ELEMENTS (iv));
+
+  EVP_CIPHER_CTX *context = EVP_CIPHER_CTX_new ();
+
+  gint delen1, delen2;
+
+  if (!EVP_DecryptInit (context, EVP_aes_256_cbc (), decryption_key, iv))
+    {
+      fp_err ("Failed to initialize EVP decrypt, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  EVP_CIPHER_CTX_set_padding (context, 0);
+
+  if (!EVP_DecryptUpdate (context, decrypted, &delen1, data + G_N_ELEMENTS (iv), length - G_N_ELEMENTS (iv)))
+    {
+      fp_err ("Failed to EVP decrypt, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!EVP_DecryptFinal (context, decrypted + delen1, &delen2))
+    {
+      fp_err ("EVP Final decrypt failed, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  EVP_CIPHER_CTX_free (context);
+
+  guint full_length = delen1 + delen2;
+  guint no_pad_length = full_length - (decrypted[full_length - 1] + 1);
+  guint no_hash_length = no_pad_length - 0x20;
+
+  tls_create_record (content_type, decrypted, no_hash_length, &record, &record_length);
+  HMAC_SHA256 (validation_key, 0x20, record, record_length, hmac);
+  g_free (record);
+
+  if (memcmp (hmac, decrypted + no_hash_length, 0x20) != 0)
+    fp_warn ("TLS record validation failed");
+
+  *out = decrypted;
+  *out_len = no_hash_length;
 }
 
 static void
@@ -999,9 +1158,12 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
-    case TLS_HANDSHAKE_SM_CLIENT_HELLO:
+    case TLS_HANDSHAKE_SM_INIT:
       SHA256_Init (&self->handshake_hash);
+      fpi_ssm_next_state (ssm);
+      break;
 
+    case TLS_HANDSHAKE_SM_CLIENT_HELLO:
       prepare_client_hello (self, &record, &record_length);
       handshake_command (record, record_length, &command, &command_length);
       g_free (record);
@@ -1010,29 +1172,37 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
       g_free (command);
       break;
 
-    case TLS_HANDSHAKE_SM_GENERATE_CERTIFICATE:
+    case TLS_HANDSHAKE_SM_SERVER_HELLO:
       parse_handshake_response (self);
-      make_keys (self);
+      fpi_ssm_next_state (ssm);
+      break;
 
+    case TLS_HANDSHAKE_SM_MAKE_KEYS:
+      make_keys (self);
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case TLS_HANDSHAKE_SM_CLIENT_FINISHED:
       prepare_certificate_kex_verify (self, &record, &record_length);
       handshake_command (record, record_length, &command, &command_length);
-
-      print_hex (command, command_length);
-
       g_free (record);
 
       exec_command (dev, ssm, command, command_length);
       g_free (command);
       break;
 
-    case TLS_HANDSHAKE_SM_CLIENT_FINISHED:
-      if (self->buffer[0] == CONTENT_TYPE_ALERT) {
-        fp_err("TLS handshake failed: %02x", self->buffer[6]);
-        fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
-      } else {
-        fp_info("TLS connection established");
-        fpi_ssm_next_state (ssm);
-      }
+    case TLS_HANDSHAKE_SM_SERVER_FINISHED:
+      if (self->buffer[0] == CONTENT_TYPE_ALERT)
+        {
+          fp_err ("TLS handshake failed: %02x", self->buffer[6]);
+          fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+        }
+      else
+        {
+          fp_info ("TLS connection established");
+          self->tls = TRUE;
+          fpi_ssm_next_state (ssm);
+        }
       break;
 
     default:
@@ -1293,7 +1463,7 @@ dev_cancel (FpDevice *device)
 
 }
 
-static gsize
+static guint
 read_dmi (const char *filename, char *buffer, int buffer_len)
 {
   FILE *file;
@@ -1320,7 +1490,8 @@ read_dmi (const char *filename, char *buffer, int buffer_len)
 static void
 fpi_device_vfs0097_init (FpiDeviceVfs0097 *self)
 {
-  gchar seed[] = "VirtualBox\0" "0";
+//  g_assert (FALSE);
+  guint8 seed[] = "VirtualBox\0" "0";
 
   self->seed_length = G_N_ELEMENTS (seed);
   self->seed = g_malloc0 (G_N_ELEMENTS (seed));
@@ -1329,7 +1500,7 @@ fpi_device_vfs0097_init (FpiDeviceVfs0097 *self)
 // TODO: Device is initialized via VirtualBox, so real HW id is not useful for now
 
 //  char name[1024], serial[1024];
-//  gsize name_len, serial_len;
+//  guint name_len, serial_len;
 //
 //  name_len = read_dmi ("/sys/class/dmi/id/product_name", name, sizeof (name));
 //  serial_len = read_dmi ("/sys/class/dmi/id/product_serial", serial, sizeof (serial));
