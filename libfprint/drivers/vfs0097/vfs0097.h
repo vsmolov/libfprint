@@ -40,15 +40,30 @@ struct _FpiDeviceVfs0097
 {
   FpDevice   parent;
 
-  guchar    *buffer;
+  guint8    *buffer;
   gsize      buffer_length;
 
   EC_KEY    *private_key;
   EC_KEY    *ecdh_q;
-  gchar     *certificate;
+  EC_KEY    *session_key;
+  guint8    *certificate;
   gsize      certificate_length;
 
-  gchar     *seed;
+  SHA256_CTX handshake_hash;
+
+  guint8     client_random[0x20];
+  guint8     server_random[0x20];
+
+  guint8    *session_id;
+  guint8     session_id_length;
+
+  guint8     master_secret[0x30];
+  guint8     sign_key[0x20];
+  guint8     validation_key[0x20];
+  guint8     encryption_key[0x20];
+  guint8     decryption_key[0x20];
+
+  guint8    *seed;
   gsize      seed_length;
 
   GPtrArray *list_result;
@@ -89,6 +104,27 @@ enum TLS_HANDSHAKE_SM {
   TLS_HANDSHAKE_STATES
 };
 
+/* TLS */
+static const unsigned char TLS_VERSION[] = { 0x03, 0x03 };
+
+static const unsigned char CONTENT_TYPE_CHANGE_CIPHER_SPEC = 0x14;
+static const unsigned char CONTENT_TYPE_ALERT = 0x15;
+static const unsigned char CONTENT_TYPE_HANDSHAKE = 0x16;
+static const unsigned char CONTENT_TYPE_DATA = 0x17;
+
+static const unsigned char POINT_FORM_UNCOMPRESSED = 0x04;
+
+enum HANDSHAKE_TYPE {
+  HANDSHAKE_TYPE_CLIENT_HELLO = 0x01,
+  HANDSHAKE_TYPE_SERVER_HELLO = 0x02,
+  HANDSHAKE_TYPE_CERTIFICATE = 0x0b,
+  HANDSHAKE_TYPE_CERTIFICATE_REQUEST = 0x0d,
+  HANDSHAKE_TYPE_SERVER_DONE = 0x0e,
+  HANDSHAKE_TYPE_CERTIFICATE_VERIFY = 0x0f,
+  HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE = 0x10,
+  HANDSHAKE_TYPE_FINISHED = 0x14
+};
+
 /* Blocks of data from USB sniffer */
 
 static const unsigned char PRE_KEY[] = {
@@ -119,8 +155,11 @@ static const unsigned char DEVICE_KEY_Y[] = {
   0xf7, 0x61, 0xa8, 0x47, 0x21, 0xa6, 0xca, 0x94,
 };
 
-static const unsigned char LABEL[] = {'G', 'W', 'K'};
-static const unsigned char LABEL_SIGN[] = {'G', 'W', 'K', '_', 'S', 'I', 'G', 'N'};
+static const unsigned char LABEL[3] = "GWK";
+static const unsigned char LABEL_SIGN[8] = "GWK_SIGN";
+static const unsigned char LABEL_MASTER_SECRET[13] = "master secret";
+static const unsigned char LABEL_KEY_EXPANSION[13] = "key expansion";
+static const unsigned char LABEL_CLIENT_FINISHED[15] = "client finished";
 
 static const unsigned char INIT_SEQUENCE_MSG1[] = { 0x01 };
 

@@ -27,12 +27,13 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/rand.h>
 #include <openssl/sha.h>
-#include <ssl.h>
 
 #include "drivers_api.h"
 
 #include "fpi-byte-reader.h"
+#include "fpi-byte-writer.h"
 
 #include "vfs0097.h"
 
@@ -43,13 +44,17 @@
 G_DEFINE_TYPE (FpiDeviceVfs0097, fpi_device_vfs0097, FP_TYPE_DEVICE)
 
 void
-print_hex (const char *buffer, size_t size)
+print_hex (const guint8 *buffer, size_t size)
 {
-  char *result = g_malloc0 (size * 2 + 1);
+  char *result = g_malloc0 (size * 3 + size / 16 + 1 + 1);
 
   for (size_t i = 0; i < size; i++)
-    sprintf (result + i * 2, "%02x", buffer[i] & 0xff);
-  result[size * 2] = 0;
+    {
+      if (i % 16 == 0)
+        sprintf (result + i * 3 + i / 16, "\n");
+      sprintf (result + i * 3 + i / 16 + 1, "%02x ", buffer[i] & 0xff);
+    }
+  result[size * 3 + size / 16 + 1] = 0;
 
   fp_info ("%s", result);
 
@@ -76,10 +81,10 @@ async_write_callback (FpiUsbTransfer *transfer, FpDevice *device,
       return;
     }
 
-  fpi_ssm_next_state (transfer->ssm);
+  fpi_ssm_next_state_delayed (transfer->ssm, VFS_SSM_TIMEOUT, NULL);
 }
 
-/* Send data to EP1, the only out endpoint */
+/* Send data to EP_OUT */
 static void
 async_write (FpiSsm   *ssm,
              FpDevice *dev,
@@ -305,10 +310,6 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 
   self->private_key = key;
 
-  fp_dbg ("X: %s", BN_bn2hex (x));
-  fp_dbg ("Y: %s", BN_bn2hex (y));
-  fp_dbg ("D: %s", BN_bn2hex (d));
-
   g_clear_pointer (&decrypted, g_free);
   g_clear_pointer (&x, BN_free);
   g_clear_pointer (&y, BN_free);
@@ -316,7 +317,7 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 }
 
 static void
-check_ecdh (FpiDeviceVfs0097 *self, const guint8 * body, guint16 size)
+init_ecdh (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 {
   FpiByteReader *reader;
   const guint8 *xb;
@@ -342,9 +343,6 @@ check_ecdh (FpiDeviceVfs0097 *self, const guint8 * body, guint16 size)
       return;
     }
 
-  fp_dbg ("ECDH X: %s", BN_bn2hex (x));
-  fp_dbg ("ECDH Y: %s", BN_bn2hex (y));
-
   g_clear_pointer (&x, BN_free);
   g_clear_pointer (&y, BN_free);
 
@@ -365,7 +363,6 @@ check_ecdh (FpiDeviceVfs0097 *self, const guint8 * body, guint16 size)
       if (b != 0)
         fp_warn ("Expected zero at %d", fpi_byte_reader_get_pos (reader));
     }
-
 
   x = BN_bin2bn (DEVICE_KEY_X, 0x20, NULL);
   y = BN_bin2bn (DEVICE_KEY_Y, 0x20, NULL);
@@ -396,7 +393,7 @@ check_ecdh (FpiDeviceVfs0097 *self, const guint8 * body, guint16 size)
 }
 
 static void
-init_certificate (FpiDeviceVfs0097 *self, const guint8 * body, guint16 size)
+init_certificate (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 {
   self->certificate_length = size;
   self->certificate = g_malloc0 (size);
@@ -458,7 +455,7 @@ init_keys (FpDevice *dev)
           break;
 
         case 6:
-          check_ecdh (self, body, body_size);
+          init_ecdh (self, body, body_size);
           break;
 
         default:
@@ -508,31 +505,540 @@ exec_command (FpDevice *dev, FpiSsm *ssm, const guchar *buffer, gsize length)
   fpi_ssm_start_subsm (ssm, subsm);
 }
 
+static void
+make_keys (FpiDeviceVfs0097 *self)
+{
+  EVP_PKEY_CTX *ctx;
+  EVP_PKEY *pkey;
+  EVP_PKEY *peer_pkey;
+
+  self->session_key = EC_KEY_new_by_curve_name (NID_X9_62_prime256v1);
+
+  if (!EC_KEY_generate_key (self->session_key))
+    {
+      fp_err ("Failed to generate key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!EC_KEY_check_key (self->session_key))
+    {
+      fp_err ("Failed to check key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  pkey = EVP_PKEY_new ();
+  peer_pkey = EVP_PKEY_new ();
+
+  if (!EVP_PKEY_set1_EC_KEY (pkey, self->session_key))
+    {
+      fp_err ("Failed to initialize session pkey, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!EVP_PKEY_set1_EC_KEY (peer_pkey, self->ecdh_q))
+    {
+      fp_err ("Failed to initialize peer pkey, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!(ctx = EVP_PKEY_CTX_new (pkey, NULL)))
+    {
+      fp_err ("Failed to initialize context, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (EVP_PKEY_derive_init (ctx) <= 0)
+    {
+      fp_err ("Failed to initialize derive, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (EVP_PKEY_derive_set_peer (ctx, peer_pkey) <= 0)
+    {
+      fp_err ("Failed to set peer key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  guint8 *pre_master_secret;
+  gulong pre_master_secret_length;
+
+  /* Determine buffer length */
+  if (EVP_PKEY_derive (ctx, NULL, &pre_master_secret_length) <= 0)
+    {
+      fp_err ("Failed to calculate derive length, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!(pre_master_secret = g_malloc0 (pre_master_secret_length)))
+    {
+      fp_err ("Failed to allocate memory for derived key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (EVP_PKEY_derive (ctx, pre_master_secret, &pre_master_secret_length) <= 0)
+    {
+      fp_err ("Failed to derive key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  guint8 *seed = g_malloc0 (0x20 + 0x20);
+  memcpy (seed, self->client_random, 0x20);
+  memcpy (seed + 0x20, self->server_random, 0x20);
+
+  PRF_SHA256 (pre_master_secret, pre_master_secret_length, LABEL_MASTER_SECRET, G_N_ELEMENTS (LABEL_MASTER_SECRET),
+              seed, 0x40, self->master_secret, 0x30);
+
+  g_free (pre_master_secret);
+
+  guint8 key_block[0x120];
+  PRF_SHA256 (self->master_secret, 0x30, LABEL_KEY_EXPANSION, G_N_ELEMENTS (LABEL_KEY_EXPANSION),
+              seed, 0x40, key_block, 0x120);
+
+  memcpy (self->sign_key, key_block, 0x20);
+  memcpy (self->validation_key, key_block + 0x20, 0x20);
+  memcpy (self->encryption_key, key_block + 0x40, 0x20);
+  memcpy (self->decryption_key, key_block + 0x60, 0x20);
+
+  fp_dbg ("sign key");
+  print_hex (self->sign_key, 0x20);
+  fp_dbg ("validation_key");
+  print_hex (self->validation_key, 0x20);
+  fp_dbg ("encryption_key");
+  print_hex (self->encryption_key, 0x20);
+  fp_dbg ("decryption_key");
+  print_hex (self->decryption_key, 0x20);
+
+  g_free (seed);
+  EVP_PKEY_free (pkey);
+  EVP_PKEY_free (peer_pkey);
+  EVP_PKEY_CTX_free (ctx);
+}
+
+static void
+tls_create_record (guint8 content_type, guint8 *fragment, guint length, guint8 **out, guint *out_len)
+{
+  FpiByteWriter writer;
+
+  fpi_byte_writer_init_with_size (&writer, 1 + G_N_ELEMENTS (TLS_VERSION) + 2 + length, TRUE);
+  fpi_byte_writer_put_uint8 (&writer, content_type);
+  fpi_byte_writer_put_data (&writer, TLS_VERSION, G_N_ELEMENTS (TLS_VERSION));
+  fpi_byte_writer_put_uint16_be (&writer, length); // Length of the record
+  fpi_byte_writer_put_data (&writer, fragment, length);
+
+  *out_len = fpi_byte_writer_get_size (&writer);
+  *out = fpi_byte_writer_reset_and_get_data (&writer);
+}
+
+static void
+tls_sign_and_encrypt (guint8 content_type, guint8 sign_key[0x20], guint8 encryption_key[0x20],
+                      guint8 *data, guint length, guint8 **out, guint *out_len)
+{
+  guint8 *record;
+  guint record_length;
+  guint8 hmac[0x20];
+  guint8 iv[0x10];
+
+  guint8 *encrypted;
+  guint encrypted_length;
+
+  RAND_bytes (iv, G_N_ELEMENTS (iv));
+
+  tls_create_record (content_type, data, length, &record, &record_length);
+  HMAC_SHA256 (sign_key, 0x20, record, record_length, hmac);
+  g_free (record);
+
+  guint8 *block = g_malloc0 (length + 0x20);
+  memcpy (block, data, length);
+  memcpy (block + length, hmac, 0x20);
+
+  encrypted_length = ((length + 16) / 16) * 16 + 0x10 + 0x20;
+  encrypted = g_malloc0 (encrypted_length);
+  memcpy (encrypted, iv, 0x10);
+
+  EVP_CIPHER_CTX *context = EVP_CIPHER_CTX_new ();
+
+  gint elen1, elen2, elen3;
+
+  if (!EVP_EncryptInit (context, EVP_aes_256_cbc (), encryption_key, iv))
+    {
+      fp_err ("Failed to initialize EVP decrypt, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  EVP_CIPHER_CTX_set_padding (context, 0);
+
+  if (!EVP_EncryptUpdate (context, encrypted + 0x10, &elen1, block, (int) length + 0x20))
+    {
+      fp_err ("Failed to EVP encrypt, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  g_free(block);
+
+  gint pad_len = encrypted_length - (length + 0x10 + 0x20);
+  if (pad_len == 0)
+    pad_len = 16;
+
+  guint8 *pad = g_malloc0 (pad_len);
+  memset (pad, pad_len - 1, pad_len);
+
+  if (!EVP_EncryptUpdate (context, encrypted + 0x10 + elen1, &elen2, pad, pad_len))
+    {
+      fp_err ("Failed to EVP encrypt, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  g_free (pad);
+
+  if (!EVP_EncryptFinal (context, encrypted + 0x10 + elen1 + elen2, &elen3))
+    {
+      fp_err ("EVP Final encrypt failed, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  EVP_CIPHER_CTX_free (context);
+
+  *out = encrypted;
+  *out_len = 0x10 + elen1 + elen2 + elen3;
+}
+
+static void
+tls_create_handshake (guint8 msg_type, guint8 *msg, guint length, guint8 **out, guint *out_len)
+{
+  FpiByteWriter writer;
+
+  fpi_byte_writer_init_with_size (&writer, 1 + 3 + length, TRUE);
+  fpi_byte_writer_put_uint8 (&writer, msg_type);
+  fpi_byte_writer_put_uint24_be (&writer, length); // Length of the message
+  fpi_byte_writer_put_data (&writer, msg, length);
+
+  *out_len = fpi_byte_writer_get_size (&writer);
+  *out = fpi_byte_writer_reset_and_get_data (&writer);
+}
+
+static void
+prepare_client_hello (FpiDeviceVfs0097 *self, guint8 **record, guint *record_length)
+{
+  FpiByteWriter writer;
+  guint client_hello_length;
+
+  static const guint8 session[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+  static const guint8 suits[] = { 0xc0, 0x05,     // TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA
+                                  0x00, 0x3d };   // TLS_RSA_WITH_AES_256_CBC_SHA256
+  static const guint8 extensions[] = { 0x00, 0x04, 0x00, 0x02, 0x00, 0x17,  // Truncated HMAC
+                                       0x00, 0x0b, 0x00, 0x02, 0x01, 0x00}; // EC Point Format: Uncompressed
+
+  RAND_bytes (self->client_random, G_N_ELEMENTS (self->client_random));
+
+  fpi_byte_writer_init (&writer);
+
+  fpi_byte_writer_put_data (&writer, TLS_VERSION, G_N_ELEMENTS (TLS_VERSION));
+  fpi_byte_writer_put_data (&writer, self->client_random, G_N_ELEMENTS (self->client_random));
+
+  fpi_byte_writer_put_uint8 (&writer, G_N_ELEMENTS (session));
+  fpi_byte_writer_put_data (&writer, session, G_N_ELEMENTS (session));
+
+  fpi_byte_writer_put_uint16_be (&writer, G_N_ELEMENTS (suits));
+  fpi_byte_writer_put_data (&writer, suits, G_N_ELEMENTS (suits));
+
+  fpi_byte_writer_put_uint8 (&writer, 0); // No compression
+
+  fpi_byte_writer_put_uint16_be (&writer, G_N_ELEMENTS (extensions) - 2);  // Non standard
+  fpi_byte_writer_put_data (&writer, extensions, G_N_ELEMENTS (extensions));
+
+  client_hello_length = fpi_byte_writer_get_size (&writer);
+  guint8 *client_hello = fpi_byte_writer_reset_and_get_data (&writer);
+
+  guint8 *handshake;
+  guint handshake_length;
+  tls_create_handshake (HANDSHAKE_TYPE_CLIENT_HELLO, client_hello, client_hello_length,
+                        &handshake, &handshake_length);
+  g_free (client_hello);
+
+  SHA256_Update (&self->handshake_hash, handshake, handshake_length);
+
+  tls_create_record (CONTENT_TYPE_HANDSHAKE, handshake, handshake_length, record, record_length);
+  g_free (handshake);
+}
+
+static void
+prepare_certificate_kex_verify (FpiDeviceVfs0097 *self, guint8 **record, guint *record_length)
+{
+  FpiByteWriter writer;
+
+  guint8 *h_certificate;
+  guint h_certificate_length;
+  guint8 *h_client_key_exchange;
+  guint h_client_key_exchange_length;
+  guint8 *h_certificate_verify;
+  guint h_certificate_verify_length;
+
+  guint8 change_cipher_spec[] = {0x14, 0x03, 0x03, 0x00, 0x01, 0x01};
+  guint change_cipher_spec_length = G_N_ELEMENTS (change_cipher_spec);
+
+  guint8 *h_finished;
+  guint h_finished_length;
+  guint8 *h_finished_enc;
+  guint h_finished_enc_length;
+  guint8 *tls_finished;
+  guint tls_finished_length;
+
+  guint8 *data;
+  guint length;
+
+  fpi_byte_writer_init (&writer);
+  fpi_byte_writer_put_int24_be (&writer, self->certificate_length);
+  fpi_byte_writer_put_int24_be (&writer, self->certificate_length);
+  fpi_byte_writer_put_int16_be (&writer, 0); // Add 2 byte padding (0xfd 0xf3 in the dump)
+  fpi_byte_writer_put_data (&writer, self->certificate, self->certificate_length);
+  length = fpi_byte_writer_get_size (&writer);
+  data = fpi_byte_writer_reset_and_get_data (&writer);
+
+  tls_create_handshake (HANDSHAKE_TYPE_CERTIFICATE, data, length, &h_certificate, &h_certificate_length);
+  SHA256_Update (&self->handshake_hash, h_certificate, h_certificate_length);
+
+  g_free (data);
+
+  const EC_POINT *point = EC_KEY_get0_public_key (self->session_key);
+  EC_GROUP *group = EC_GROUP_new_by_curve_name (NID_X9_62_prime256v1);
+  BIGNUM *x = BN_new ();
+  BIGNUM *y = BN_new ();
+  EC_POINT_get_affine_coordinates (group, point, x, y, NULL);
+
+  guint8 coord[0x20];
+
+  fpi_byte_writer_init (&writer);
+  fpi_byte_writer_put_uint8 (&writer, POINT_FORM_UNCOMPRESSED);
+
+  BN_bn2bin (x, coord);
+  fpi_byte_writer_put_data (&writer, coord, 0x20);
+
+  BN_bn2bin (y, coord);
+  fpi_byte_writer_put_data (&writer, coord, 0x20);
+
+  length = fpi_byte_writer_get_size (&writer);
+  data = fpi_byte_writer_reset_and_get_data (&writer);
+
+  tls_create_handshake (HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE, data, length, &h_client_key_exchange, &h_client_key_exchange_length);
+  SHA256_Update (&self->handshake_hash, h_client_key_exchange, h_client_key_exchange_length);
+
+  g_free (data);
+  EC_GROUP_free (group);
+  BN_free (x);
+  BN_free (y);
+
+  guint8 hash[0x20];
+  SHA256_CTX ctx;
+  memcpy (&ctx, &self->handshake_hash, sizeof (ctx));
+  SHA256_Final (hash, &ctx);
+
+  guint8 signature[0x48];
+  guint signature_length;
+  do   // Do we really need to loop?
+    ECDSA_sign (0, hash, 0x20, signature, &signature_length, self->private_key);
+  while (signature_length != 0x48);
+
+  tls_create_handshake (HANDSHAKE_TYPE_CERTIFICATE_VERIFY, signature, signature_length,
+                        &h_certificate_verify, &h_certificate_verify_length);
+  SHA256_Update (&self->handshake_hash, h_certificate_verify, h_certificate_verify_length);
+  SHA256_Final (hash, &self->handshake_hash);
+
+  guint8 verify[0xC];
+  PRF_SHA256 (self->master_secret, 0x30,
+              LABEL_CLIENT_FINISHED, G_N_ELEMENTS (LABEL_CLIENT_FINISHED),
+              hash, 0x20,
+              verify, 0xC);
+  tls_create_handshake (HANDSHAKE_TYPE_FINISHED, verify, 0xC, &h_finished, &h_finished_length);
+
+  tls_sign_and_encrypt (CONTENT_TYPE_HANDSHAKE, self->sign_key, self->encryption_key, h_finished, h_finished_length,
+                        &h_finished_enc, &h_finished_enc_length);
+  tls_create_record (CONTENT_TYPE_HANDSHAKE, h_finished_enc, h_finished_enc_length, &tls_finished, &tls_finished_length);
+
+  fpi_byte_writer_init (&writer);
+  fpi_byte_writer_put_data (&writer, h_certificate, h_certificate_length);
+  fpi_byte_writer_put_data (&writer, h_client_key_exchange, h_client_key_exchange_length);
+  fpi_byte_writer_put_data (&writer, h_certificate_verify, h_certificate_verify_length);
+  length = fpi_byte_writer_get_size (&writer);
+  data = fpi_byte_writer_reset_and_get_data (&writer);
+
+  guint8 *first_part;
+  guint first_part_length;
+  tls_create_record (CONTENT_TYPE_HANDSHAKE, data, length, &first_part, &first_part_length);
+  g_free (data);
+
+  fpi_byte_writer_init (&writer);
+  fpi_byte_writer_put_data (&writer, first_part, first_part_length);
+  fpi_byte_writer_put_data (&writer, change_cipher_spec, change_cipher_spec_length);
+  fpi_byte_writer_put_data (&writer, tls_finished, tls_finished_length);
+  *record_length = fpi_byte_writer_get_size (&writer);
+  *record = fpi_byte_writer_reset_and_get_data (&writer);
+}
+
+static void
+parse_handshake_response (FpiDeviceVfs0097 *self)
+{
+  FpiByteReader reader;
+
+  fpi_byte_reader_init (&reader, self->buffer, self->buffer_length);
+
+  guint8 type;
+  guint16 length;
+
+  fpi_byte_reader_get_uint8 (&reader, &type);
+  fpi_byte_reader_skip (&reader, G_N_ELEMENTS (TLS_VERSION));
+  fpi_byte_reader_get_uint16_be (&reader, &length);
+  fp_dbg ("Type: %x, Length: %x", type, length);
+
+  while (fpi_byte_reader_get_remaining (&reader) > 0)
+    {
+      static const guint8 header_length = 4;
+      guint8 handshake_type;
+      guint handshake_length;
+      const guint8 *data;
+      guint pos;
+      guint8 tmp8;
+      guint16 tmp16;
+
+      pos = fpi_byte_reader_get_pos (&reader);
+
+      fpi_byte_reader_get_uint8 (&reader, &handshake_type);
+      fpi_byte_reader_get_uint24_be (&reader, &handshake_length);
+
+      fp_dbg ("Handshake Type: %x, len: %x", handshake_type, handshake_length);
+      fpi_byte_reader_set_pos (&reader, pos);
+
+      fpi_byte_reader_get_data (&reader, header_length + handshake_length, &data);
+      SHA256_Update (&self->handshake_hash, data, header_length + handshake_length);
+
+      fpi_byte_reader_set_pos (&reader, pos);
+      fpi_byte_reader_skip (&reader, header_length);
+
+      switch (handshake_type)
+        {
+        case HANDSHAKE_TYPE_SERVER_HELLO:
+          fpi_byte_reader_skip (&reader, G_N_ELEMENTS (TLS_VERSION));
+          fpi_byte_reader_get_data (&reader, 0x20, &data);
+          memcpy (self->server_random, data, 0x20);
+
+          fpi_byte_reader_get_uint8 (&reader, &self->session_id_length);
+          fpi_byte_reader_get_data (&reader, self->session_id_length, &data);
+          self->session_id = g_memdup (data, self->session_id_length);
+
+          fpi_byte_reader_get_uint16_be (&reader, &tmp16);
+          if (tmp16 != 0xc005)
+            fp_warn ("Unexpected cipher suite: %04x", tmp16);
+
+          fpi_byte_reader_get_uint8 (&reader, &tmp8);
+          if (tmp8 != 0)
+            fp_warn ("Unexpected compression: %02x", tmp8);
+
+          break;
+
+        case HANDSHAKE_TYPE_CERTIFICATE_REQUEST:
+          fpi_byte_reader_get_uint8 (&reader, &tmp8); // Length of requested certificate types
+          if (tmp8 != 1)
+            fp_warn ("Server requested too many certificate types: %02x", tmp8);
+
+          fpi_byte_reader_get_uint8 (&reader, &tmp8); // Certificate type
+          if (tmp8 != 64) // CERT_TYPE_ECDSA_SIGN
+            fp_warn ("Server requested an unexpected certificate type: %02d", tmp8);
+
+          fpi_byte_reader_get_uint16_le (&reader, &tmp16);
+          if (tmp16 != 0)
+            fp_warn ("Server requested an unsupported signature and hash algorithms");
+
+          break;
+
+        case HANDSHAKE_TYPE_SERVER_DONE:
+          if (handshake_length != 0)
+            fp_warn ("Expected no data for HANDSHAKE_TYPE_SERVER_DONE");
+          break;
+
+        default:
+          fp_warn ("Unexpected handshake message type: %02x", handshake_type);
+        }
+    }
+}
+
+static void
+handshake_command (guint8 *data, guint data_length, guint8 **buffer, guint *buffer_length)
+{
+  static const guint8 command[] = {0x44, 0x00, 0x00, 0x00};
+  static const guint len = G_N_ELEMENTS (command);
+
+  *buffer_length = data_length + len;
+  *buffer = g_malloc0 (*buffer_length);
+  memcpy (*buffer, command, len);
+  memcpy (*buffer + len, data, data_length);
+}
+
 /* SSM loop for TLS handshake */
 static void
 handshake_ssm (FpiSsm *ssm, FpDevice *dev)
 {
+  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
+  guint8 *record;
+  guint record_length;
+
+  guint8 *command;
+  guint command_length;
+
   switch (fpi_ssm_get_cur_state (ssm))
-  {
+    {
     case TLS_HANDSHAKE_SM_CLIENT_HELLO:
-//      exec_command(dev, ssm, "", 0);
+      SHA256_Init (&self->handshake_hash);
 
+      prepare_client_hello (self, &record, &record_length);
+      handshake_command (record, record_length, &command, &command_length);
+      g_free (record);
 
-      fpi_ssm_next_state(ssm);
+      exec_command (dev, ssm, command, command_length);
+      g_free (command);
       break;
 
     case TLS_HANDSHAKE_SM_GENERATE_CERTIFICATE:
-      fpi_ssm_next_state(ssm);
+      parse_handshake_response (self);
+      make_keys (self);
+
+      prepare_certificate_kex_verify (self, &record, &record_length);
+      handshake_command (record, record_length, &command, &command_length);
+
+      print_hex (command, command_length);
+
+      g_free (record);
+
+      exec_command (dev, ssm, command, command_length);
+      g_free (command);
       break;
 
     case TLS_HANDSHAKE_SM_CLIENT_FINISHED:
-      fpi_ssm_next_state(ssm);
+      if (self->buffer[0] == CONTENT_TYPE_ALERT) {
+        fp_err("TLS handshake failed: %02x", self->buffer[6]);
+        fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+      } else {
+        fp_info("TLS connection established");
+        fpi_ssm_next_state (ssm);
+      }
       break;
 
     default:
       fp_err ("Unknown EXEC_COMMAND_SM state");
       fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
-  }
+    }
 }
 
 static void
@@ -621,6 +1127,7 @@ clear_data (FpiDeviceVfs0097 *self)
   g_clear_pointer (&self->seed, g_free);
   g_clear_pointer (&self->buffer, g_free);
   g_clear_pointer (&self->certificate, g_free);
+  g_clear_pointer (&self->session_id, g_free);
   g_clear_pointer (&self->private_key, EC_KEY_free);
   g_clear_pointer (&self->ecdh_q, EC_KEY_free);
 }
@@ -716,8 +1223,6 @@ static void
 dev_list (FpDevice *device)
 {
   FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (device);
-
-  G_DEBUG_HERE ();
 
   self->list_result = g_ptr_array_new_with_free_func (g_object_unref);
 
