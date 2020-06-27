@@ -43,6 +43,26 @@
 
 G_DEFINE_TYPE (FpiDeviceVfs0097, fpi_device_vfs0097, FP_TYPE_DEVICE)
 
+static FpFinger
+subtype_to_finger(guint16 subtype)
+{
+  if (subtype >= 0xF5 && subtype <= 0xFE) {
+    return FP_FINGER_FIRST + subtype - 0xF5;
+  } else {
+    return FP_FINGER_UNKNOWN;
+  }
+}
+
+static guint16
+finger_to_subtype(FpFinger finger)
+{
+  if (finger == FP_FINGER_UNKNOWN) {
+    return 0xFF;
+  } else {
+    return finger - FP_FINGER_FIRST + 0xF5;
+  }
+}
+
 static void
 print_hex (const guint8 *buffer, size_t size)
 {
@@ -518,6 +538,7 @@ exec_command_ssm (FpiSsm *ssm, FpDevice *dev)
           g_free (raw);
           g_free (encrypted);
         }
+
       fpi_ssm_next_state (ssm);
       break;
 
@@ -545,11 +566,10 @@ exec_command_ssm (FpiSsm *ssm, FpDevice *dev)
           memcpy (self->buffer, raw, raw_length);
           self->buffer_length = raw_length;
 
-          print_hex (self->buffer, self->buffer_length);
-
           g_free (raw);
           g_free (encrypted);
         }
+
       fpi_ssm_next_state (ssm);
       break;
 
@@ -1194,6 +1214,7 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
     case TLS_HANDSHAKE_SM_SERVER_FINISHED:
       if (self->buffer[0] == CONTENT_TYPE_ALERT)
         {
+          // 15 03 03 00 02 02 2f
           fp_err ("TLS handshake failed: %02x", self->buffer[6]);
           fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
         }
@@ -1288,6 +1309,229 @@ init_ssm (FpiSsm *ssm, FpDevice *dev)
       fp_err ("Unknown INIT_SM state");
       fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
     }
+}
+
+static void
+get_users_db_ssm (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097(dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+  {
+    case GET_USER_STORAGE: {
+      FpiByteWriter writer;
+      fpi_byte_writer_init(&writer);
+      fpi_byte_writer_put_uint8(&writer, 0x4b);
+      fpi_byte_writer_put_uint16_le(&writer, 0);
+      fpi_byte_writer_put_uint16_le(&writer, G_N_ELEMENTS(STORAGE));
+      fpi_byte_writer_put_data(&writer, STORAGE, G_N_ELEMENTS(STORAGE));
+
+      guint length = fpi_byte_writer_get_size(&writer);
+      guint8 *data = fpi_byte_writer_reset_and_get_data(&writer);
+
+      exec_command(dev, ssm, data, length);
+      break;
+    }
+    case PARSE_USER_STORAGE:
+    {
+      FpiByteReader reader;
+      fpi_byte_reader_init(&reader, self->buffer, self->buffer_length);
+
+      guint16 status;
+      fpi_byte_reader_get_uint16_le(&reader, &status);
+
+      if (status == 0x04b3) {
+        fp_warn("Weird status");
+      }
+
+      if (status != 0) {
+        fp_warn("Bad status");
+      }
+
+      guint16 recid, usercnt, namesz, unknwn;
+      fpi_byte_reader_get_uint16_le(&reader, &recid);
+      fpi_byte_reader_get_uint16_le(&reader, &usercnt);
+      fpi_byte_reader_get_uint16_le(&reader, &namesz);
+      fpi_byte_reader_get_uint16_le(&reader, &unknwn);
+
+      fp_dbg("recid: %u, usercnt: %u, namesz: %u, unknwn: %u", recid, usercnt, namesz, unknwn);
+
+      GSList *list = NULL;
+
+      for (int i = 0; i < usercnt; i++){
+        guint16 id, val;
+        fpi_byte_reader_get_uint16_le(&reader, &id);
+        fpi_byte_reader_get_uint16_le(&reader, &val);
+
+        list = g_slist_append(list, GUINT_TO_POINTER(id));
+
+        fp_dbg("DBID: %d, ValueSize: %d", id, val);
+      }
+
+      const guint8 *name;
+      fpi_byte_reader_get_data(&reader, namesz, &name);
+
+      fp_dbg("Name: %s", name);
+      if (fpi_byte_reader_get_remaining(&reader) > 0) {
+        fp_warn("Junk at the end of the storage info response");
+      }
+
+      fpi_ssm_set_data(ssm, list, NULL); // TODO: ?
+
+      fpi_ssm_next_state(ssm);
+      break;
+    }
+    case GET_USER: {
+      GSList *list = fpi_ssm_get_data(ssm);
+      GSList *first = list;
+
+      list = g_slist_remove_link(list, first);
+      fpi_ssm_set_data(ssm, list, NULL);
+
+      guint16 id = GPOINTER_TO_UINT(first->data);
+
+      g_slist_free(first);
+
+      fp_info("Querying DB for user: %u", id);
+
+      FpiByteWriter writer;
+      fpi_byte_writer_init(&writer);
+      fpi_byte_writer_put_uint8(&writer, 0x4a);
+      fpi_byte_writer_put_uint16_le(&writer, id); // DBID
+      fpi_byte_writer_put_uint16_le(&writer, 0); // Lookup: DBID
+      fpi_byte_writer_put_uint16_le(&writer, 0); // Lookup: IDENTITY
+
+      guint length = fpi_byte_writer_get_size(&writer);
+      guint8 *data = fpi_byte_writer_reset_and_get_data(&writer);
+
+      exec_command(dev, ssm, data, length);
+      break;
+    }
+    case PARSE_USER: {
+      FpiByteReader reader;
+      fpi_byte_reader_init(&reader, self->buffer, self->buffer_length);
+
+      guint16 status;
+      fpi_byte_reader_get_uint16_le(&reader, &status);
+
+      if (status == 0x04b3) {
+        fp_warn("Weird status");
+      }
+
+      if (status != 0) {
+        fp_warn("Bad status");
+      }
+
+      guint16 recid, fingercnt, unknwn, identitysz;
+      fpi_byte_reader_get_uint16_le(&reader, &recid);
+      fpi_byte_reader_get_uint16_le(&reader, &fingercnt);
+      fpi_byte_reader_get_uint16_le(&reader, &unknwn);
+      fpi_byte_reader_get_uint16_le(&reader, &identitysz);
+
+      fp_dbg("recid: %u, fingercnt: %u, unknwn: %u, identitysz: %u", recid, fingercnt, unknwn, identitysz);
+
+      guint16 *ids = g_malloc0(fingercnt * sizeof(guint16));
+      guint16 *subtypes = g_malloc0(fingercnt * sizeof(guint16));
+
+      for (int i = 0; i < fingercnt; i++){
+        guint16 stgid, valsz;
+        fpi_byte_reader_get_uint16_le(&reader, &ids[i]);
+        fpi_byte_reader_get_uint16_le(&reader, &subtypes[i]);
+        fpi_byte_reader_get_uint16_le(&reader, &stgid);
+        fpi_byte_reader_get_uint16_le(&reader, &valsz);
+
+        fp_dbg("FRID: %d, SUBTYPE: %d, STGID: %d, VALSZ: %d", ids[i], subtypes[i], stgid, valsz);
+      }
+
+      const guint8 *identity;
+      fpi_byte_reader_get_data(&reader, identitysz, &identity);
+
+      {
+        FpiByteReader r;
+        guint type;
+
+        fpi_byte_reader_init(&r, identity, identitysz);
+        fpi_byte_reader_get_uint32_le(&r, &type);
+
+        if (type == 3) {
+          guint length;
+          fpi_byte_reader_get_uint32_le(&r, &length);
+
+          guint8 revision, subcnt;
+          fpi_byte_reader_get_uint8(&r, &revision);
+          fpi_byte_reader_get_uint8(&r, &subcnt);
+
+          guint8 auth[6];
+          for (int i = 0; i < 6; i++) {
+            fpi_byte_reader_get_uint8(&r, &auth[i]);
+          }
+
+          if (memcmp(auth, "fprint", 6) == 0) {
+            const guint8 *username;
+            fpi_byte_reader_get_data(&r, subcnt * 4, &username);
+            fp_dbg("Found FPrint user: %s", username);
+
+            for (int i = 0; i < fingercnt; i++) {
+              FpPrint *print = fp_print_new(dev);
+
+              fpi_print_set_device_stored(print, TRUE);
+              fpi_print_set_type(print, FPI_PRINT_RAW);
+
+              fp_print_set_username(print, username);
+              fp_print_set_finger(print, subtype_to_finger(subtypes[i]));
+              char buf[100];
+              sprintf(buf, "id = %d", ids[i]);
+              fp_print_set_description(print, buf);
+
+              g_ptr_array_add (self->list_result, g_object_ref_sink (print));
+            }
+          } else {
+            gulong authority = auth[0] << 40 |
+                               auth[1] << 32 |
+                               auth[2] << 24 |
+                               auth[3] << 16 |
+                               auth[4] << 8  |
+                               auth[5];
+
+            guint *subauth = g_malloc0_n(subcnt, sizeof(guint));
+            for (int i = 0; i < subcnt; i++) {
+              fpi_byte_reader_get_uint32_le(&r, &subauth[i]);
+            }
+
+            gchar buffer[100] = { 0 };
+            for (int i = 0, l = 0; i < subcnt; i++) {
+              sprintf(&buffer[l], "%u-", subauth[i]);
+              l = strlen(buffer);
+            }
+
+            g_free(subauth);
+
+            fp_dbg("SID: S-%d-%ld-%s", revision, authority, buffer);
+          }
+        } else {
+          fp_warn("Unknown identity type");
+        }
+      }
+
+      g_free(ids);
+      g_free(subtypes);
+
+      if (fpi_byte_reader_get_remaining(&reader) > 0) {
+        fp_warn("Junk at the end of the user info response");
+      }
+
+      GSList *list = fpi_ssm_get_data(ssm);
+      if (list != NULL) {
+        fpi_ssm_jump_to_state(ssm, GET_USER);
+      } else {
+        fpi_ssm_next_state(ssm);
+      }
+      break;
+    }
+    default:
+      fp_err ("Unknown EXEC_COMMAND_SM state");
+      fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+  }
 }
 
 /* Clears all fprint data */
@@ -1388,6 +1632,16 @@ dev_close (FpDevice *device)
   fpi_device_close_complete (FP_DEVICE (self), error);
 }
 
+static void
+dev_list_callback(FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
+
+  fpi_device_list_complete (FP_DEVICE (self),
+                            g_steal_pointer (&self->list_result),
+                            error);
+}
+
 /* List prints */
 static void
 dev_list (FpDevice *device)
@@ -1396,9 +1650,8 @@ dev_list (FpDevice *device)
 
   self->list_result = g_ptr_array_new_with_free_func (g_object_unref);
 
-  fpi_device_list_complete (FP_DEVICE (self),
-                            g_steal_pointer (&self->list_result),
-                            NULL);
+  FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), get_users_db_ssm, GET_USERS_DB_STATES);
+  fpi_ssm_start (ssm, dev_list_callback);
 }
 
 /* List prints */
@@ -1426,17 +1679,6 @@ dev_delete (FpDevice *device)
   fpi_device_delete_complete (FP_DEVICE (self), NULL);
 }
 
-/* Identify print */
-static void
-dev_identify (FpDevice *device)
-{
-  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (device);
-
-  G_DEBUG_HERE ();
-
-  fpi_device_identify_complete (FP_DEVICE (self), NULL);
-}
-
 /* Verify print */
 static void
 dev_verify (FpDevice *device)
@@ -1446,9 +1688,9 @@ dev_verify (FpDevice *device)
 
   G_DEBUG_HERE ();
 
-//  fpi_device_get_verify_data (device, &print);
-//  g_debug ("username: %s", fp_print_get_username(print));
-//  fpi_device_verify_report (device, FPI_MATCH_SUCCESS, NULL, NULL);
+  fpi_device_get_verify_data (device, &print);
+  g_debug ("username: %s", fp_print_get_username(print));
+  fpi_device_verify_report (device, FPI_MATCH_SUCCESS, NULL, NULL);
 
   fpi_device_verify_complete (FP_DEVICE (self), NULL);
 }
@@ -1528,12 +1770,12 @@ fpi_device_vfs0097_class_init (FpiDeviceVfs0097Class *klass)
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->id_table = id_table;
+  dev_class->nr_enroll_stages = 10;
 
   dev_class->open = dev_open;
   dev_class->close = dev_close;
   dev_class->enroll = dev_enroll;
   dev_class->delete = dev_delete;
-  dev_class->identify = dev_identify;
   dev_class->verify = dev_verify;
   dev_class->cancel = dev_cancel;
   dev_class->list = dev_list;

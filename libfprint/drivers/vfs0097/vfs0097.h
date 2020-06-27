@@ -110,6 +110,17 @@ enum TLS_HANDSHAKE_SM {
   TLS_HANDSHAKE_STATES
 };
 
+/* SSM states for users DB */
+enum GET_USERS_DB_SM {
+    GET_USER_STORAGE,
+    PARSE_USER_STORAGE,
+    GET_USER,
+    PARSE_USER,
+
+    GET_USERS_DB_STATES
+};
+
+
 /* TLS */
 static const unsigned char TLS_VERSION[] = { 0x03, 0x03 };
 
@@ -166,6 +177,8 @@ static const unsigned char LABEL_SIGN[8] = "GWK_SIGN";
 static const unsigned char LABEL_MASTER_SECRET[13] = "master secret";
 static const unsigned char LABEL_KEY_EXPANSION[13] = "key expansion";
 static const unsigned char LABEL_CLIENT_FINISHED[15] = "client finished";
+
+static const unsigned char STORAGE[] = "StgWindsor";
 
 static const unsigned char INIT_SEQUENCE_MSG1[] = { 0x01 };
 
