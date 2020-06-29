@@ -44,23 +44,21 @@
 G_DEFINE_TYPE (FpiDeviceVfs0097, fpi_device_vfs0097, FP_TYPE_DEVICE)
 
 static FpFinger
-subtype_to_finger(guint16 subtype)
+subtype_to_finger (guint16 subtype)
 {
-  if (subtype >= 0xF5 && subtype <= 0xFE) {
+  if (subtype >= 0xF5 && subtype <= 0xFE)
     return FP_FINGER_FIRST + subtype - 0xF5;
-  } else {
+  else
     return FP_FINGER_UNKNOWN;
-  }
 }
 
 static guint16
-finger_to_subtype(FpFinger finger)
+finger_to_subtype (FpFinger finger)
 {
-  if (finger == FP_FINGER_UNKNOWN) {
+  if (finger == FP_FINGER_UNKNOWN)
     return 0xFF;
-  } else {
+  else
     return finger - FP_FINGER_FIRST + 0xF5;
-  }
 }
 
 static void
@@ -1314,224 +1312,428 @@ init_ssm (FpiSsm *ssm, FpDevice *dev)
 static void
 get_users_db_ssm (FpiSsm *ssm, FpDevice *dev)
 {
-  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097(dev);
+  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
 
   switch (fpi_ssm_get_cur_state (ssm))
-  {
-    case GET_USER_STORAGE: {
-      FpiByteWriter writer;
-      fpi_byte_writer_init(&writer);
-      fpi_byte_writer_put_uint8(&writer, 0x4b);
-      fpi_byte_writer_put_uint16_le(&writer, 0);
-      fpi_byte_writer_put_uint16_le(&writer, G_N_ELEMENTS(STORAGE));
-      fpi_byte_writer_put_data(&writer, STORAGE, G_N_ELEMENTS(STORAGE));
-
-      guint length = fpi_byte_writer_get_size(&writer);
-      guint8 *data = fpi_byte_writer_reset_and_get_data(&writer);
-
-      exec_command(dev, ssm, data, length);
-      break;
-    }
-    case PARSE_USER_STORAGE:
     {
-      FpiByteReader reader;
-      fpi_byte_reader_init(&reader, self->buffer, self->buffer_length);
+    case GET_USER_STORAGE: {
+        FpiByteWriter writer;
+        fpi_byte_writer_init (&writer);
+        fpi_byte_writer_put_uint8 (&writer, 0x4b);
+        fpi_byte_writer_put_uint16_le (&writer, 0);
+        fpi_byte_writer_put_uint16_le (&writer, G_N_ELEMENTS (STORAGE));
+        fpi_byte_writer_put_data (&writer, STORAGE, G_N_ELEMENTS (STORAGE));
 
-      guint16 status;
-      fpi_byte_reader_get_uint16_le(&reader, &status);
+        guint length = fpi_byte_writer_get_size (&writer);
+        guint8 *data = fpi_byte_writer_reset_and_get_data (&writer);
 
-      if (status == 0x04b3) {
-        fp_warn("Weird status");
+        exec_command (dev, ssm, data, length);
+        break;
       }
 
-      if (status != 0) {
-        fp_warn("Bad status");
-      }
-
-      guint16 recid, usercnt, namesz, unknwn;
-      fpi_byte_reader_get_uint16_le(&reader, &recid);
-      fpi_byte_reader_get_uint16_le(&reader, &usercnt);
-      fpi_byte_reader_get_uint16_le(&reader, &namesz);
-      fpi_byte_reader_get_uint16_le(&reader, &unknwn);
-
-      fp_dbg("recid: %u, usercnt: %u, namesz: %u, unknwn: %u", recid, usercnt, namesz, unknwn);
-
-      GSList *list = NULL;
-
-      for (int i = 0; i < usercnt; i++){
-        guint16 id, val;
-        fpi_byte_reader_get_uint16_le(&reader, &id);
-        fpi_byte_reader_get_uint16_le(&reader, &val);
-
-        list = g_slist_append(list, GUINT_TO_POINTER(id));
-
-        fp_dbg("DBID: %d, ValueSize: %d", id, val);
-      }
-
-      const guint8 *name;
-      fpi_byte_reader_get_data(&reader, namesz, &name);
-
-      fp_dbg("Name: %s", name);
-      if (fpi_byte_reader_get_remaining(&reader) > 0) {
-        fp_warn("Junk at the end of the storage info response");
-      }
-
-      fpi_ssm_set_data(ssm, list, NULL); // TODO: ?
-
-      fpi_ssm_next_state(ssm);
-      break;
-    }
-    case GET_USER: {
-      GSList *list = fpi_ssm_get_data(ssm);
-      GSList *first = list;
-
-      list = g_slist_remove_link(list, first);
-      fpi_ssm_set_data(ssm, list, NULL);
-
-      guint16 id = GPOINTER_TO_UINT(first->data);
-
-      g_slist_free(first);
-
-      fp_info("Querying DB for user: %u", id);
-
-      FpiByteWriter writer;
-      fpi_byte_writer_init(&writer);
-      fpi_byte_writer_put_uint8(&writer, 0x4a);
-      fpi_byte_writer_put_uint16_le(&writer, id); // DBID
-      fpi_byte_writer_put_uint16_le(&writer, 0); // Lookup: DBID
-      fpi_byte_writer_put_uint16_le(&writer, 0); // Lookup: IDENTITY
-
-      guint length = fpi_byte_writer_get_size(&writer);
-      guint8 *data = fpi_byte_writer_reset_and_get_data(&writer);
-
-      exec_command(dev, ssm, data, length);
-      break;
-    }
-    case PARSE_USER: {
-      FpiByteReader reader;
-      fpi_byte_reader_init(&reader, self->buffer, self->buffer_length);
-
-      guint16 status;
-      fpi_byte_reader_get_uint16_le(&reader, &status);
-
-      if (status == 0x04b3) {
-        fp_warn("Weird status");
-      }
-
-      if (status != 0) {
-        fp_warn("Bad status");
-      }
-
-      guint16 recid, fingercnt, unknwn, identitysz;
-      fpi_byte_reader_get_uint16_le(&reader, &recid);
-      fpi_byte_reader_get_uint16_le(&reader, &fingercnt);
-      fpi_byte_reader_get_uint16_le(&reader, &unknwn);
-      fpi_byte_reader_get_uint16_le(&reader, &identitysz);
-
-      fp_dbg("recid: %u, fingercnt: %u, unknwn: %u, identitysz: %u", recid, fingercnt, unknwn, identitysz);
-
-      guint16 *ids = g_malloc0(fingercnt * sizeof(guint16));
-      guint16 *subtypes = g_malloc0(fingercnt * sizeof(guint16));
-
-      for (int i = 0; i < fingercnt; i++){
-        guint16 stgid, valsz;
-        fpi_byte_reader_get_uint16_le(&reader, &ids[i]);
-        fpi_byte_reader_get_uint16_le(&reader, &subtypes[i]);
-        fpi_byte_reader_get_uint16_le(&reader, &stgid);
-        fpi_byte_reader_get_uint16_le(&reader, &valsz);
-
-        fp_dbg("FRID: %d, SUBTYPE: %d, STGID: %d, VALSZ: %d", ids[i], subtypes[i], stgid, valsz);
-      }
-
-      const guint8 *identity;
-      fpi_byte_reader_get_data(&reader, identitysz, &identity);
-
+    case PARSE_USER_STORAGE:
       {
-        FpiByteReader r;
-        guint type;
+        FpiByteReader reader;
+        fpi_byte_reader_init (&reader, self->buffer, self->buffer_length);
 
-        fpi_byte_reader_init(&r, identity, identitysz);
-        fpi_byte_reader_get_uint32_le(&r, &type);
+        guint16 status;
+        fpi_byte_reader_get_uint16_le (&reader, &status);
 
-        if (type == 3) {
-          guint length;
-          fpi_byte_reader_get_uint32_le(&r, &length);
+        if (status == 0x04b3)
+          fp_warn ("Weird status");
 
-          guint8 revision, subcnt;
-          fpi_byte_reader_get_uint8(&r, &revision);
-          fpi_byte_reader_get_uint8(&r, &subcnt);
+        if (status != 0)
+          fp_warn ("Bad status");
 
-          guint8 auth[6];
-          for (int i = 0; i < 6; i++) {
-            fpi_byte_reader_get_uint8(&r, &auth[i]);
+        guint16 recid, usercnt, namesz, unknwn;
+        fpi_byte_reader_get_uint16_le (&reader, &recid);
+        fpi_byte_reader_get_uint16_le (&reader, &usercnt);
+        fpi_byte_reader_get_uint16_le (&reader, &namesz);
+        fpi_byte_reader_get_uint16_le (&reader, &unknwn);
+
+        fp_dbg ("recid: %u, usercnt: %u, namesz: %u, unknwn: %u", recid, usercnt, namesz, unknwn);
+
+        GSList *list = NULL;
+
+        for (int i = 0; i < usercnt; i++)
+          {
+            guint16 id, val;
+            fpi_byte_reader_get_uint16_le (&reader, &id);
+            fpi_byte_reader_get_uint16_le (&reader, &val);
+
+            list = g_slist_append (list, GUINT_TO_POINTER (id));
+
+            fp_dbg ("DBID: %d, ValueSize: %d", id, val);
           }
 
-          if (memcmp(auth, "fprint", 6) == 0) {
-            const guint8 *username;
-            fpi_byte_reader_get_data(&r, subcnt * 4, &username);
-            fp_dbg("Found FPrint user: %s", username);
+        const guint8 *name;
+        fpi_byte_reader_get_data (&reader, namesz, &name);
 
-            for (int i = 0; i < fingercnt; i++) {
-              FpPrint *print = fp_print_new(dev);
+        fp_dbg ("Name: %s", name);
+        if (fpi_byte_reader_get_remaining (&reader) > 0)
+          fp_warn ("Junk at the end of the storage info response");
 
-              fpi_print_set_device_stored(print, TRUE);
-              fpi_print_set_type(print, FPI_PRINT_RAW);
+        fpi_ssm_set_data (ssm, list, NULL); // TODO: ?
 
-              fp_print_set_username(print, username);
-              fp_print_set_finger(print, subtype_to_finger(subtypes[i]));
-              char buf[100];
-              sprintf(buf, "id = %d", ids[i]);
-              fp_print_set_description(print, buf);
+        fpi_ssm_next_state (ssm);
+        break;
+      }
 
-              g_ptr_array_add (self->list_result, g_object_ref_sink (print));
-            }
-          } else {
-            gulong authority = auth[0] << 40 |
-                               auth[1] << 32 |
-                               auth[2] << 24 |
-                               auth[3] << 16 |
-                               auth[4] << 8  |
-                               auth[5];
+    case GET_USER: {
+        GSList *list = fpi_ssm_get_data (ssm);
+        GSList *first = list;
 
-            guint *subauth = g_malloc0_n(subcnt, sizeof(guint));
-            for (int i = 0; i < subcnt; i++) {
-              fpi_byte_reader_get_uint32_le(&r, &subauth[i]);
-            }
+        list = g_slist_remove_link (list, first);
+        fpi_ssm_set_data (ssm, list, NULL);
 
-            gchar buffer[100] = { 0 };
-            for (int i = 0, l = 0; i < subcnt; i++) {
-              sprintf(&buffer[l], "%u-", subauth[i]);
-              l = strlen(buffer);
-            }
+        guint16 id = GPOINTER_TO_UINT (first->data);
 
-            g_free(subauth);
+        g_slist_free (first);
 
-            fp_dbg("SID: S-%d-%ld-%s", revision, authority, buffer);
+        fp_info ("Querying DB for user: %u", id);
+
+        FpiByteWriter writer;
+        fpi_byte_writer_init (&writer);
+        fpi_byte_writer_put_uint8 (&writer, 0x4a);
+        fpi_byte_writer_put_uint16_le (&writer, id); // DBID
+        fpi_byte_writer_put_uint16_le (&writer, 0); // Lookup: DBID
+        fpi_byte_writer_put_uint16_le (&writer, 0); // Lookup: IDENTITY
+
+        guint length = fpi_byte_writer_get_size (&writer);
+        guint8 *data = fpi_byte_writer_reset_and_get_data (&writer);
+
+        exec_command (dev, ssm, data, length);
+        break;
+      }
+
+    case PARSE_USER: {
+        FpiByteReader reader;
+        fpi_byte_reader_init (&reader, self->buffer, self->buffer_length);
+
+        guint16 status;
+        fpi_byte_reader_get_uint16_le (&reader, &status);
+
+        if (status == 0x04b3)
+          fp_warn ("Weird status");
+
+        if (status != 0)
+          fp_warn ("Bad status");
+
+        guint16 recid, fingercnt, unknwn, identitysz;
+        fpi_byte_reader_get_uint16_le (&reader, &recid);
+        fpi_byte_reader_get_uint16_le (&reader, &fingercnt);
+        fpi_byte_reader_get_uint16_le (&reader, &unknwn);
+        fpi_byte_reader_get_uint16_le (&reader, &identitysz);
+
+        fp_dbg ("recid: %u, fingercnt: %u, unknwn: %u, identitysz: %u", recid, fingercnt, unknwn, identitysz);
+
+        guint16 *ids = g_malloc0 (fingercnt * sizeof (guint16));
+        guint16 *subtypes = g_malloc0 (fingercnt * sizeof (guint16));
+
+        for (int i = 0; i < fingercnt; i++)
+          {
+            guint16 stgid, valsz;
+            fpi_byte_reader_get_uint16_le (&reader, &ids[i]);
+            fpi_byte_reader_get_uint16_le (&reader, &subtypes[i]);
+            fpi_byte_reader_get_uint16_le (&reader, &stgid);
+            fpi_byte_reader_get_uint16_le (&reader, &valsz);
+
+            fp_dbg ("FRID: %d, SUBTYPE: %d, STGID: %d, VALSZ: %d", ids[i], subtypes[i], stgid, valsz);
           }
-        } else {
-          fp_warn("Unknown identity type");
+
+        const guint8 *identity;
+        fpi_byte_reader_get_data (&reader, identitysz, &identity);
+
+        {
+          FpiByteReader r;
+          guint type;
+
+          fpi_byte_reader_init (&r, identity, identitysz);
+          fpi_byte_reader_get_uint32_le (&r, &type);
+
+          if (type == 3)
+            {
+              guint length;
+              fpi_byte_reader_get_uint32_le (&r, &length);
+
+              guint8 revision, subcnt;
+              fpi_byte_reader_get_uint8 (&r, &revision);
+              fpi_byte_reader_get_uint8 (&r, &subcnt);
+
+              guint8 auth[6];
+              for (int i = 0; i < 6; i++)
+                fpi_byte_reader_get_uint8 (&r, &auth[i]);
+
+              if (memcmp (auth, "fprint", 6) == 0)
+                {
+                  const guint8 *username;
+                  fpi_byte_reader_get_data (&r, subcnt * 4, &username);
+                  fp_dbg ("Found FPrint user: %s", username);
+
+                  for (int i = 0; i < fingercnt; i++)
+                    {
+                      FpPrint *print = fp_print_new (dev);
+
+                      fpi_print_set_device_stored (print, TRUE);
+                      fpi_print_set_type (print, FPI_PRINT_RAW);
+
+                      fp_print_set_username (print, username);
+                      fp_print_set_finger (print, subtype_to_finger (subtypes[i]));
+                      GDateTime *dt = g_date_time_new_now_local ();
+                      GDate *date = g_date_new_dmy (
+                        g_date_time_get_day_of_month (dt),
+                        g_date_time_get_month (dt),
+                        g_date_time_get_year (dt));
+                      fp_print_set_enroll_date (print, date);
+
+//              g_date_time_unref(dt);
+                      g_date_free (date);
+
+                      char buf[100];
+                      sprintf (buf, "id = %d", ids[i]);
+                      fp_print_set_description (print, buf);
+
+                      g_ptr_array_add (self->list_result, g_object_ref_sink (print));
+                    }
+                }
+              else
+                {
+                  gulong authority = auth[0] << 40 |
+                                     auth[1] << 32 |
+                                     auth[2] << 24 |
+                                     auth[3] << 16 |
+                                     auth[4] << 8  |
+                                     auth[5];
+
+                  guint *subauth = g_malloc0_n (subcnt, sizeof (guint));
+                  for (int i = 0; i < subcnt; i++)
+                    fpi_byte_reader_get_uint32_le (&r, &subauth[i]);
+
+                  gchar buffer[100] = { 0 };
+                  for (int i = 0, l = 0; i < subcnt; i++)
+                    {
+                      sprintf (&buffer[l], "%u-", subauth[i]);
+                      l = strlen (buffer);
+                    }
+
+                  g_free (subauth);
+
+                  fp_dbg ("SID: S-%d-%ld-%s", revision, authority, buffer);
+                }
+            }
+          else
+            {
+              fp_warn ("Unknown identity type");
+            }
         }
+
+        g_free (ids);
+        g_free (subtypes);
+
+        if (fpi_byte_reader_get_remaining (&reader) > 0)
+          fp_warn ("Junk at the end of the user info response");
+
+        GSList *list = fpi_ssm_get_data (ssm);
+        if (list != NULL)
+          fpi_ssm_jump_to_state (ssm, GET_USER);
+        else
+          fpi_ssm_next_state (ssm);
+        break;
       }
 
-      g_free(ids);
-      g_free(subtypes);
+    default:
+      fp_err ("Unknown GET_USERS_DB_SM state: %d", fpi_ssm_get_cur_state (ssm));
+      fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+    }
+}
 
-      if (fpi_byte_reader_get_remaining(&reader) > 0) {
-        fp_warn("Junk at the end of the user info response");
-      }
+static void
+interrupt_cb (FpiUsbTransfer *transfer,
+              FpDevice       *dev,
+              gpointer        user_data,
+              GError         *error)
+{
+  if (error)
+    {
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          g_error_free (error);
+          fpi_ssm_jump_to_state (transfer->ssm, VERIFY_FAILED);
+          return;
+        }
 
-      GSList *list = fpi_ssm_get_data(ssm);
-      if (list != NULL) {
-        fpi_ssm_jump_to_state(ssm, GET_USER);
+      fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+  g_clear_pointer (&error, g_error_free);
+
+  enum FINGERPRINT_VERIFY_SM next_state;
+  if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_WAITING_FINGER) &&
+      memcmp (transfer->buffer, INTERRUPT_WAITING_FINGER, G_N_ELEMENTS (INTERRUPT_WAITING_FINGER)) == 0)
+    next_state = WAITING_FINGER;
+  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_FINGER_DOWN) &&
+           memcmp (transfer->buffer, INTERRUPT_FINGER_DOWN, G_N_ELEMENTS (INTERRUPT_FINGER_DOWN)) == 0)
+    next_state = FINGER_DOWN;
+  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCANNING_FINGERPRINT) &&
+           memcmp (transfer->buffer, INTERRUPT_SCANNING_FINGERPRINT, G_N_ELEMENTS (INTERRUPT_SCANNING_FINGERPRINT)) == 0)
+    next_state = SCANNING_FINGERPRINT;
+  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_SHORT) &&
+           memcmp (transfer->buffer, INTERRUPT_SCAN_FAILED_TOO_SHORT, G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_SHORT)) == 0)
+    next_state = SCAN_FAILED_TOO_SHORT;
+  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_FAST) &&
+           memcmp (transfer->buffer, INTERRUPT_SCAN_FAILED_TOO_FAST, G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_FAST)) == 0)
+    next_state = SCAN_FAILED_TOO_FAST;
+  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_COMPLETED) &&
+           memcmp (transfer->buffer, INTERRUPT_SCAN_COMPLETED, G_N_ELEMENTS (INTERRUPT_SCAN_COMPLETED)) == 0)
+    next_state = SCAN_COMPLETED;
+  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_SUCCESS) &&
+           memcmp (transfer->buffer, INTERRUPT_SCAN_SUCCESS, G_N_ELEMENTS (INTERRUPT_SCAN_SUCCESS)) == 0)
+    next_state = SCAN_SUCCESS;
+  else if (transfer->buffer[0] == 0x03 && transfer->buffer[4] == 0xdb)
+  {
+    fpi_ssm_set_data(transfer->ssm, GINT_TO_POINTER(transfer->buffer[2]), NULL);
+    next_state = MATCH_USER_FINISH;
+  }
+  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_USER_NOT_FOUND) &&
+           memcmp (transfer->buffer, INTERRUPT_USER_NOT_FOUND, G_N_ELEMENTS (INTERRUPT_USER_NOT_FOUND)) == 0)
+  {
+    fpi_ssm_set_data(transfer->ssm, GINT_TO_POINTER(-1), NULL);
+    next_state = MATCH_USER_FINISH;
+  }
+  else {
+    fp_warn("Unknown interrupt: %02x %02x %02x %02x %02x", transfer->buffer[0], transfer->buffer[1], transfer->buffer[2],
+            transfer->buffer[3], transfer->buffer[4]);
+    next_state = VERIFY_FAILED;
+  }
+  fpi_ssm_jump_to_state (transfer->ssm, next_state);
+}
+
+static void
+await_interrupt (FpDevice *dev, FpiSsm *ssm)
+{
+  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
+  FpiUsbTransfer *transfer;
+
+  transfer = fpi_usb_transfer_new (dev);
+  transfer->ssm = ssm;
+  fpi_usb_transfer_fill_interrupt (transfer, EP_INTERRUPT, USB_INTERRUPT_DATA_SIZE);
+  fpi_usb_transfer_submit (transfer,
+                           0,
+                           self->interrupt_cancellable,
+                           interrupt_cb,
+                           NULL);
+}
+
+static void
+verify_ssm (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case VERIFY_START:
+      exec_command (dev, ssm, LED_GREEN_ON, G_N_ELEMENTS (LED_GREEN_ON));
+      break;
+
+    case START_IDENTIFY_PROGRAM:
+      exec_command (dev, ssm, IDENTIFY_PROGRAM, G_N_ELEMENTS (IDENTIFY_PROGRAM));
+      break;
+
+    case AWAIT_INTERRUPT:
+      await_interrupt (dev, ssm);
+      break;
+
+    case WAITING_FINGER:
+      fp_info ("Waiting for finger");
+      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      break;
+
+    case FINGER_DOWN:
+      fp_info ("Finger is on the sensor");
+      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      break;
+
+    case SCANNING_FINGERPRINT:
+      fp_info ("Fingerprint scan in progress");
+      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      break;
+
+    case SCAN_FAILED_TOO_SHORT:
+      fp_info ("Impossible to read fingerprint, keep it in the sensor");
+      fpi_ssm_jump_to_state (ssm, VERIFY_FAILED);
+      break;
+
+    case SCAN_FAILED_TOO_FAST:
+      fp_info ("Impossible to read fingerprint, movement was too fast");
+      fpi_ssm_jump_to_state (ssm, VERIFY_FAILED);
+      break;
+
+    case SCAN_COMPLETED:
+      fp_info ("Fingerprint scan completed");
+      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      break;
+
+    case SCAN_SUCCESS:
+      fp_info ("Successful scan");
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case MATCH_USER_START:
+      exec_command(dev, ssm, MATCH_SEQUENCE, G_N_ELEMENTS(MATCH_SEQUENCE));
+      break;
+
+    case MATCH_USER_WAIT:
+      await_interrupt(dev, ssm);
+      break;
+
+    case MATCH_USER_FINISH:
+    {
+      gint id = GPOINTER_TO_INT(fpi_ssm_get_data(ssm));
+      if (id < 0) {
+        fp_info("Fingerprint UNKNOWN");
       } else {
-        fpi_ssm_next_state(ssm);
+        fp_info("Fingerprint FOUND = %d", id);
       }
+      fpi_ssm_jump_to_state(ssm, RESET);
       break;
     }
+
+    case RESET:
+      exec_command(dev, ssm, RESET_SEQUENCE, G_N_ELEMENTS(RESET_SEQUENCE));
+      break;
+
+    case FINISH:
+      exec_command(dev, ssm, FINISH_SEQUENCE, G_N_ELEMENTS(FINISH_SEQUENCE));
+      break;
+
+    case VERIFY_SUCCESS:
+    {
+      gint id = GPOINTER_TO_INT(fpi_ssm_get_data(ssm));
+      if (id < 0) {
+        fpi_ssm_jump_to_state(ssm, VERIFY_FAILED);
+        break;
+      } else {
+        exec_command(dev, ssm, LED_GREEN_BLINK, G_N_ELEMENTS (LED_GREEN_BLINK));
+        break;
+      }
+    }
+
+    case VERIFY_SUCCESS_FINISH:
+      fpi_ssm_mark_completed (ssm);
+      break;
+
+    case VERIFY_FAILED:
+      exec_command (dev, ssm, LED_RED_BLINK, G_N_ELEMENTS (LED_RED_BLINK));
+      break;
+
+    case VERIFY_FAILED_FINISH:
+      fpi_ssm_mark_completed (ssm);
+      break;
+
     default:
-      fp_err ("Unknown EXEC_COMMAND_SM state");
+      fp_err ("Unknown FINGERPRINT_VERIFY_SM state");
       fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
-  }
+    }
 }
 
 /* Clears all fprint data */
@@ -1544,6 +1746,7 @@ clear_data (FpiDeviceVfs0097 *self)
   g_clear_pointer (&self->session_id, g_free);
   g_clear_pointer (&self->private_key, EC_KEY_free);
   g_clear_pointer (&self->ecdh_q, EC_KEY_free);
+  g_clear_object (&self->interrupt_cancellable);
 }
 
 /* Callback for device initialization SSM */
@@ -1611,6 +1814,8 @@ dev_open (FpDevice *device)
 
   self->buffer = g_malloc0 (VFS_USB_BUFFER_SIZE);
 
+  self->interrupt_cancellable = g_cancellable_new ();
+
   FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), init_ssm, INIT_SM_STATES);
   fpi_ssm_start (ssm, dev_open_callback);
 }
@@ -1633,7 +1838,7 @@ dev_close (FpDevice *device)
 }
 
 static void
-dev_list_callback(FpiSsm *ssm, FpDevice *dev, GError *error)
+dev_list_callback (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
 
@@ -1663,9 +1868,7 @@ dev_enroll (FpDevice *device)
 
   G_DEBUG_HERE ();
 
-  fpi_device_get_enroll_data (device, &print);
-
-  fpi_device_enroll_complete (FP_DEVICE (self), g_object_ref (print), NULL);
+  fpi_device_enroll_complete (FP_DEVICE (self), NULL, fpi_device_error_new(FP_DEVICE_ERROR_BUSY));
 }
 
 /* Delete print */
@@ -1681,18 +1884,23 @@ dev_delete (FpDevice *device)
 
 /* Verify print */
 static void
+dev_verify_callback (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, NULL, NULL);
+  fpi_device_verify_complete (dev, NULL);
+}
+
+static void
 dev_verify (FpDevice *device)
 {
   FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (device);
   FpPrint *print = NULL;
 
-  G_DEBUG_HERE ();
-
   fpi_device_get_verify_data (device, &print);
-  g_debug ("username: %s", fp_print_get_username(print));
-  fpi_device_verify_report (device, FPI_MATCH_SUCCESS, NULL, NULL);
+  g_debug ("username: %s", fp_print_get_username (print));
 
-  fpi_device_verify_complete (FP_DEVICE (self), NULL);
+  FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), verify_ssm, FINGERPRINT_VERIFY_STATES);
+  fpi_ssm_start (ssm, dev_verify_callback);
 }
 
 /* Cancel current action */
@@ -1701,8 +1909,14 @@ dev_cancel (FpDevice *device)
 {
   FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (device);
 
-  G_DEBUG_HERE ();
+  // TODO: Send RESET and FINISH sequence?
 
+  /* Cancel any current interrupt transfer (resulting us to go into
+   * response reading mode again); then create a new cancellable
+   * for the next transfers. */
+  g_cancellable_cancel (self->interrupt_cancellable);
+  g_clear_object (&self->interrupt_cancellable);
+  self->interrupt_cancellable = g_cancellable_new ();
 }
 
 static guint
