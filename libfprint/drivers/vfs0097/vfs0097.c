@@ -41,6 +41,9 @@
 #define EP_OUT (1 | FPI_USB_ENDPOINT_OUT)
 #define EP_INTERRUPT (3 | FPI_USB_ENDPOINT_IN)
 
+#define INTERRUPT_CMP(transfer, interrupt) (transfer->actual_length == G_N_ELEMENTS (interrupt) && \
+                                            memcmp (transfer->buffer, interrupt, G_N_ELEMENTS (interrupt)) == 0)
+
 G_DEFINE_TYPE (FpiDeviceVfs0097, fpi_device_vfs0097, FP_TYPE_DEVICE)
 
 static FpFinger
@@ -1567,43 +1570,37 @@ interrupt_cb (FpiUsbTransfer *transfer,
     }
   g_clear_pointer (&error, g_error_free);
 
-  enum FINGERPRINT_VERIFY_SM next_state;
-  if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_WAITING_FINGER) &&
-      memcmp (transfer->buffer, INTERRUPT_WAITING_FINGER, G_N_ELEMENTS (INTERRUPT_WAITING_FINGER)) == 0)
+  gint next_state;
+  if (INTERRUPT_CMP(transfer, INTERRUPT_WAITING_FINGER))
     next_state = WAITING_FINGER;
-  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_FINGER_DOWN) &&
-           memcmp (transfer->buffer, INTERRUPT_FINGER_DOWN, G_N_ELEMENTS (INTERRUPT_FINGER_DOWN)) == 0)
+  else if (INTERRUPT_CMP(transfer, INTERRUPT_FINGER_DOWN))
     next_state = FINGER_DOWN;
-  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCANNING_FINGERPRINT) &&
-           memcmp (transfer->buffer, INTERRUPT_SCANNING_FINGERPRINT, G_N_ELEMENTS (INTERRUPT_SCANNING_FINGERPRINT)) == 0)
+  else if (INTERRUPT_CMP(transfer, INTERRUPT_SCANNING_FINGERPRINT))
     next_state = SCANNING_FINGERPRINT;
-  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_SHORT) &&
-           memcmp (transfer->buffer, INTERRUPT_SCAN_FAILED_TOO_SHORT, G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_SHORT)) == 0)
+  else if (INTERRUPT_CMP(transfer, INTERRUPT_SCAN_FAILED_TOO_SHORT))
     next_state = SCAN_FAILED_TOO_SHORT;
-  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_FAST) &&
-           memcmp (transfer->buffer, INTERRUPT_SCAN_FAILED_TOO_FAST, G_N_ELEMENTS (INTERRUPT_SCAN_FAILED_TOO_FAST)) == 0)
+  else if (INTERRUPT_CMP(transfer, INTERRUPT_SCAN_FAILED_TOO_FAST))
     next_state = SCAN_FAILED_TOO_FAST;
-  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_COMPLETED) &&
-           memcmp (transfer->buffer, INTERRUPT_SCAN_COMPLETED, G_N_ELEMENTS (INTERRUPT_SCAN_COMPLETED)) == 0)
+  else if (INTERRUPT_CMP(transfer, INTERRUPT_SCAN_COMPLETED))
     next_state = SCAN_COMPLETED;
-  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_SCAN_SUCCESS) &&
-           memcmp (transfer->buffer, INTERRUPT_SCAN_SUCCESS, G_N_ELEMENTS (INTERRUPT_SCAN_SUCCESS)) == 0)
+  else if (INTERRUPT_CMP(transfer, INTERRUPT_SCAN_SUCCESS))
     next_state = SCAN_SUCCESS;
   else if (transfer->buffer[0] == 0x03 && transfer->buffer[4] == 0xdb)
   {
-    fpi_ssm_set_data(transfer->ssm, GINT_TO_POINTER(transfer->buffer[2]), NULL);
+    gint *data = fpi_ssm_get_data(transfer->ssm);
+    *data = transfer->buffer[2];
     next_state = MATCH_USER_FINISH;
   }
-  else if (transfer->actual_length == G_N_ELEMENTS (INTERRUPT_USER_NOT_FOUND) &&
-           memcmp (transfer->buffer, INTERRUPT_USER_NOT_FOUND, G_N_ELEMENTS (INTERRUPT_USER_NOT_FOUND)) == 0)
+  else if (INTERRUPT_CMP(transfer, INTERRUPT_USER_NOT_FOUND))
   {
-    fpi_ssm_set_data(transfer->ssm, GINT_TO_POINTER(-1), NULL);
+    gint *data = fpi_ssm_get_data(transfer->ssm);
+    *data = -1;
     next_state = MATCH_USER_FINISH;
   }
   else {
     fp_warn("Unknown interrupt: %02x %02x %02x %02x %02x", transfer->buffer[0], transfer->buffer[1], transfer->buffer[2],
             transfer->buffer[3], transfer->buffer[4]);
-    next_state = VERIFY_FAILED;
+    next_state = SCAN_FAILED;
   }
   fpi_ssm_jump_to_state (transfer->ssm, next_state);
 }
@@ -1625,61 +1622,102 @@ await_interrupt (FpDevice *dev, FpiSsm *ssm)
 }
 
 static void
-verify_ssm (FpiSsm *ssm, FpDevice *dev)
+capture_ssm (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
+  gint *data = fpi_ssm_get_data(ssm);
 
-  switch (fpi_ssm_get_cur_state (ssm))
-    {
+  switch (fpi_ssm_get_cur_state (ssm)) {
     case VERIFY_START:
-      exec_command (dev, ssm, LED_GREEN_ON, G_N_ELEMENTS (LED_GREEN_ON));
+      exec_command(dev, ssm, LED_GREEN_ON, G_N_ELEMENTS (LED_GREEN_ON));
       break;
 
     case START_IDENTIFY_PROGRAM:
-      exec_command (dev, ssm, IDENTIFY_PROGRAM, G_N_ELEMENTS (IDENTIFY_PROGRAM));
+      exec_command(dev, ssm, IDENTIFY_PROGRAM, G_N_ELEMENTS (IDENTIFY_PROGRAM));
       break;
 
     case AWAIT_INTERRUPT:
-      await_interrupt (dev, ssm);
+      await_interrupt(dev, ssm);
       break;
 
     case WAITING_FINGER:
       fp_info ("Waiting for finger");
-      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      fpi_ssm_jump_to_state(ssm, AWAIT_INTERRUPT);
       break;
 
     case FINGER_DOWN:
       fp_info ("Finger is on the sensor");
-      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      fpi_ssm_jump_to_state(ssm, AWAIT_INTERRUPT);
       break;
 
     case SCANNING_FINGERPRINT:
       fp_info ("Fingerprint scan in progress");
-      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      fpi_ssm_jump_to_state(ssm, AWAIT_INTERRUPT);
       break;
 
     case SCAN_FAILED_TOO_SHORT:
       fp_info ("Impossible to read fingerprint, keep it in the sensor");
-      fpi_ssm_jump_to_state (ssm, VERIFY_FAILED);
+      fpi_ssm_jump_to_state(ssm, SCAN_FAILED);
       break;
 
     case SCAN_FAILED_TOO_FAST:
       fp_info ("Impossible to read fingerprint, movement was too fast");
-      fpi_ssm_jump_to_state (ssm, VERIFY_FAILED);
+      fpi_ssm_jump_to_state(ssm, SCAN_FAILED);
       break;
 
     case SCAN_COMPLETED:
       fp_info ("Fingerprint scan completed");
-      fpi_ssm_jump_to_state (ssm, AWAIT_INTERRUPT);
+      fpi_ssm_jump_to_state(ssm, AWAIT_INTERRUPT);
       break;
 
     case SCAN_SUCCESS:
       fp_info ("Successful scan");
-      fpi_ssm_next_state (ssm);
+      *data = TRUE;
+      fpi_ssm_mark_completed(ssm);
       break;
 
-    case MATCH_USER_START:
-      exec_command(dev, ssm, MATCH_SEQUENCE, G_N_ELEMENTS(MATCH_SEQUENCE));
+    case SCAN_FAILED:
+      fp_info ("Failed to scan");
+      *data = FALSE;
+      fpi_ssm_mark_completed(ssm);
+      break;
+
+    default:
+      fp_err ("Unknown CAPTURE_SM state");
+      fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+  }
+}
+
+static void
+do_capture(FpDevice *dev, FpiSsm *ssm)
+{
+  FpiSsm *subsm;
+
+  gint *data = fpi_ssm_get_data(ssm);
+
+  subsm = fpi_ssm_new (dev, capture_ssm, CAPTURE_STATES);
+  fpi_ssm_set_data(subsm, data, NULL);
+  fpi_ssm_start_subsm (ssm, subsm);
+}
+
+static void
+verify_ssm (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
+  gint *data = fpi_ssm_get_data(ssm);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CAPTURE:
+      do_capture (dev, ssm);
+      break;
+
+    case MATCH_USER:
+      if (*data) {
+        exec_command (dev, ssm, MATCH_SEQUENCE, G_N_ELEMENTS(MATCH_SEQUENCE));
+      } else {
+        fpi_ssm_jump_to_state (ssm, VERIFY_FAILED);
+      }
       break;
 
     case MATCH_USER_WAIT:
@@ -1687,16 +1725,13 @@ verify_ssm (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case MATCH_USER_FINISH:
-    {
-      gint id = GPOINTER_TO_INT(fpi_ssm_get_data(ssm));
-      if (id < 0) {
+      if (*data < 0) {
         fp_info("Fingerprint UNKNOWN");
       } else {
-        fp_info("Fingerprint FOUND = %d", id);
+        fp_info("Fingerprint FOUND = %d", *data);
       }
       fpi_ssm_jump_to_state(ssm, RESET);
       break;
-    }
 
     case RESET:
       exec_command(dev, ssm, RESET_SEQUENCE, G_N_ELEMENTS(RESET_SEQUENCE));
@@ -1707,16 +1742,12 @@ verify_ssm (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case VERIFY_SUCCESS:
-    {
-      gint id = GPOINTER_TO_INT(fpi_ssm_get_data(ssm));
-      if (id < 0) {
+      if (*data < 0) {
         fpi_ssm_jump_to_state(ssm, VERIFY_FAILED);
-        break;
       } else {
         exec_command(dev, ssm, LED_GREEN_BLINK, G_N_ELEMENTS (LED_GREEN_BLINK));
-        break;
       }
-    }
+      break;
 
     case VERIFY_SUCCESS_FINISH:
       fpi_ssm_mark_completed (ssm);
@@ -1866,7 +1897,11 @@ dev_enroll (FpDevice *device)
   FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (device);
   FpPrint *print = NULL;
 
-  G_DEBUG_HERE ();
+  fpi_device_get_enroll_data (device, &print);
+  fpi_print_set_device_stored(print, TRUE);
+
+
+  fp_warn("%d", g_date_get_day(fp_print_get_enroll_date(print)));
 
   fpi_device_enroll_complete (FP_DEVICE (self), NULL, fpi_device_error_new(FP_DEVICE_ERROR_BUSY));
 }
@@ -1899,7 +1934,10 @@ dev_verify (FpDevice *device)
   fpi_device_get_verify_data (device, &print);
   g_debug ("username: %s", fp_print_get_username (print));
 
+  gint *data = g_new0(gint, 1);
+
   FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), verify_ssm, FINGERPRINT_VERIFY_STATES);
+  fpi_ssm_set_data (ssm, data, g_free);
   fpi_ssm_start (ssm, dev_verify_callback);
 }
 
