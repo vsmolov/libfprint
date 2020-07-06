@@ -45,6 +45,12 @@
 
 G_DEFINE_TYPE (FpiDeviceVfs0097, fpi_device_vfs0097, FP_TYPE_DEVICE)
 
+/* Usb id table of device */
+static const FpIdEntry id_table[] = {
+  {.vid = 0x138a,  .pid = 0x0097, },
+  {.vid = 0,  .pid = 0,  .driver_data = 0},
+};
+
 static FpFinger
 subtype_to_finger (guint16 subtype)
 {
@@ -62,30 +68,6 @@ finger_to_subtype (FpFinger finger)
   else
     return finger - FP_FINGER_FIRST + 0xf5;
 }
-
-static void
-print_hex (const guint8 *buffer, size_t size)
-{
-  char *result = g_malloc0 (size * 3 + size / 16 + 1 + 1);
-
-  for (size_t i = 0; i < size; i++)
-    {
-      if (i % 16 == 0)
-        sprintf (result + i * 3 + i / 16, "\n");
-      sprintf (result + i * 3 + i / 16 + 1, "%02x ", buffer[i] & 0xff);
-    }
-  result[size * 3 + size / 16 + 1] = 0;
-
-  fp_info ("%s", result);
-
-  g_free (result);
-}
-
-/* Usb id table of device */
-static const FpIdEntry id_table[] = {
-  {.vid = 0x138a,  .pid = 0x0097, },
-  {.vid = 0,  .pid = 0,  .driver_data = 0},
-};
 
 /* USB functions */
 
@@ -151,7 +133,7 @@ async_read (FpiSsm   *ssm,
 
   transfer = fpi_usb_transfer_new (FP_DEVICE (dev));
   transfer->ssm = ssm;
-  transfer->short_is_error = FALSE; // TODO: We do not know actual response lengths yet, so
+  transfer->short_is_error = FALSE; //
 
   if (data == NULL)
     {
@@ -181,7 +163,7 @@ await_interrupt (FpDevice *dev, FpiSsm *ssm, FpiUsbTransferCallback callback)
                            NULL);
 }
 
-/* Proto functions */
+/* Cryptographic functions */
 
 static guint8 *
 HMAC_SHA256 (const guint8 *key, guint32 key_len,
@@ -243,6 +225,38 @@ PRF_SHA256 (const guint8 *secret, guint32 secret_len,
 
   g_free (A);
 }
+
+/* TLS forward declarations */
+
+static void tls_sign_and_encrypt (guint8   content_type,
+                                  guint8   sign_key[0x20],
+                                  guint8   encryption_key[0x20],
+                                  guint8  *data,
+                                  guint    length,
+                                  guint8 **out,
+                                  guint   *out_len);
+
+static void tls_decrypt_and_validate (guint8   content_type,
+                                      guint8   validation_key[0x20],
+                                      guint8   decryption_key[0x20],
+                                      guint8  *data,
+                                      guint    length,
+                                      guint8 **out,
+                                      guint   *out_len);
+
+static void tls_create_record (guint8   content_type,
+                               guint8  *fragment,
+                               guint    length,
+                               guint8 **out,
+                               guint   *out_len);
+
+static void tls_parse_record (guint8   content_type,
+                              guint8  *fragment,
+                              guint    length,
+                              guint8 **out,
+                              guint   *out_len);
+
+/* Initialization from device's flash */
 
 static void
 init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
@@ -495,40 +509,22 @@ init_keys (FpDevice *dev)
     }
 }
 
-static void tls_sign_and_encrypt (guint8   content_type,
-                                  guint8   sign_key[0x20],
-                                  guint8   encryption_key[0x20],
-                                  guint8  *data,
-                                  guint    length,
-                                  guint8 **out,
-                                  guint   *out_len);
+/* SSM for exec_command */
 
-static void tls_decrypt_and_validate (guint8   content_type,
-                                      guint8   validation_key[0x20],
-                                      guint8   decryption_key[0x20],
-                                      guint8  *data,
-                                      guint    length,
-                                      guint8 **out,
-                                      guint   *out_len);
-
-static void tls_create_record (guint8   content_type,
-                               guint8  *fragment,
-                               guint    length,
-                               guint8 **out,
-                               guint   *out_len);
-
-static void tls_parse_record (guint8   content_type,
-                              guint8  *fragment,
-                              guint    length,
-                              guint8 **out,
-                              guint   *out_len);
-
-/* SSM loop for exec_command */
 struct command_ssm_data_t
 {
   guint8 *buffer;
   guint   length;
 };
+
+static void
+command_ssm_data_free (void *data)
+{
+  struct command_ssm_data_t *ssm_data = data;
+
+  g_free (ssm_data->buffer);
+  g_free (ssm_data);
+}
 
 static void
 exec_command_ssm (FpiSsm *ssm, FpDevice *dev)
@@ -595,15 +591,6 @@ exec_command_ssm (FpiSsm *ssm, FpDevice *dev)
     }
 }
 
-static void
-command_ssm_data_free (void *data)
-{
-  struct command_ssm_data_t *ssm_data = data;
-
-  g_free (ssm_data->buffer);
-  g_free (ssm_data);
-}
-
 /* Send command and read response */
 static void
 exec_command (FpDevice *dev, FpiSsm *ssm, const guint8 *buffer, guint length)
@@ -621,124 +608,7 @@ exec_command (FpDevice *dev, FpiSsm *ssm, const guint8 *buffer, guint length)
   fpi_ssm_start_subsm (ssm, subsm);
 }
 
-static void
-make_keys (FpiDeviceVfs0097 *self)
-{
-  EVP_PKEY_CTX *ctx;
-  EVP_PKEY *pkey;
-  EVP_PKEY *peer_pkey;
-
-  self->session_key = EC_KEY_new_by_curve_name (NID_X9_62_prime256v1);
-
-  if (!EC_KEY_generate_key (self->session_key))
-    {
-      fp_err ("Failed to generate key, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  if (!EC_KEY_check_key (self->session_key))
-    {
-      fp_err ("Failed to check key, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  pkey = EVP_PKEY_new ();
-  peer_pkey = EVP_PKEY_new ();
-
-  if (!EVP_PKEY_set1_EC_KEY (pkey, self->session_key))
-    {
-      fp_err ("Failed to initialize session pkey, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  if (!EVP_PKEY_set1_EC_KEY (peer_pkey, self->ecdh_q))
-    {
-      fp_err ("Failed to initialize peer pkey, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  if (!(ctx = EVP_PKEY_CTX_new (pkey, NULL)))
-    {
-      fp_err ("Failed to initialize context, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  if (EVP_PKEY_derive_init (ctx) <= 0)
-    {
-      fp_err ("Failed to initialize derive, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  if (EVP_PKEY_derive_set_peer (ctx, peer_pkey) <= 0)
-    {
-      fp_err ("Failed to set peer key, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  guint8 *pre_master_secret;
-  gulong pre_master_secret_length;
-
-  /* Determine buffer length */
-  if (EVP_PKEY_derive (ctx, NULL, &pre_master_secret_length) <= 0)
-    {
-      fp_err ("Failed to calculate derive length, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  if (!(pre_master_secret = g_malloc0 (pre_master_secret_length)))
-    {
-      fp_err ("Failed to allocate memory for derived key, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  if (EVP_PKEY_derive (ctx, pre_master_secret, &pre_master_secret_length) <= 0)
-    {
-      fp_err ("Failed to derive key, error: %lu, %s",
-              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
-    }
-
-  guint8 *seed = g_malloc0 (0x20 + 0x20);
-  memcpy (seed, self->client_random, 0x20);
-  memcpy (seed + 0x20, self->server_random, 0x20);
-
-  PRF_SHA256 (pre_master_secret, pre_master_secret_length, LABEL_MASTER_SECRET, G_N_ELEMENTS (LABEL_MASTER_SECRET),
-              seed, 0x40, self->master_secret, 0x30);
-
-  g_free (pre_master_secret);
-
-  guint8 key_block[0x120];
-  PRF_SHA256 (self->master_secret, 0x30, LABEL_KEY_EXPANSION, G_N_ELEMENTS (LABEL_KEY_EXPANSION),
-              seed, 0x40, key_block, 0x120);
-
-  memcpy (self->sign_key, key_block, 0x20);
-  memcpy (self->validation_key, key_block + 0x20, 0x20);
-  memcpy (self->encryption_key, key_block + 0x40, 0x20);
-  memcpy (self->decryption_key, key_block + 0x60, 0x20);
-
-  fp_dbg ("sign key");
-  print_hex (self->sign_key, 0x20);
-  fp_dbg ("validation_key");
-  print_hex (self->validation_key, 0x20);
-  fp_dbg ("encryption_key");
-  print_hex (self->encryption_key, 0x20);
-  fp_dbg ("decryption_key");
-  print_hex (self->decryption_key, 0x20);
-
-  g_free (seed);
-  EVP_PKEY_free (pkey);
-  EVP_PKEY_free (peer_pkey);
-  EVP_PKEY_CTX_free (ctx);
-}
+/* TLS */
 
 static void
 tls_create_record (guint8 content_type, guint8 *fragment, guint length, guint8 **out, guint *out_len)
@@ -926,7 +796,7 @@ tls_create_handshake (guint8 msg_type, guint8 *msg, guint length, guint8 **out, 
 }
 
 static void
-prepare_client_hello (FpiDeviceVfs0097 *self, guint8 **record, guint *record_length)
+tls_prepare_client_hello (FpiDeviceVfs0097 *self, guint8 **record, guint *record_length)
 {
   FpiByteWriter writer;
   guint client_hello_length;
@@ -971,7 +841,7 @@ prepare_client_hello (FpiDeviceVfs0097 *self, guint8 **record, guint *record_len
 }
 
 static void
-prepare_certificate_kex_verify (FpiDeviceVfs0097 *self, guint8 **record, guint *record_length)
+tls_prepare_certificate_kex_verify (FpiDeviceVfs0097 *self, guint8 **record, guint *record_length)
 {
   FpiByteWriter writer;
 
@@ -1083,8 +953,130 @@ prepare_certificate_kex_verify (FpiDeviceVfs0097 *self, guint8 **record, guint *
   *record = fpi_byte_writer_reset_and_get_data (&writer);
 }
 
+
 static void
-parse_handshake_response (FpiDeviceVfs0097 *self)
+tls_make_keys (FpiDeviceVfs0097 *self)
+{
+  EVP_PKEY_CTX *ctx;
+  EVP_PKEY *pkey;
+  EVP_PKEY *peer_pkey;
+
+  self->session_key = EC_KEY_new_by_curve_name (NID_X9_62_prime256v1);
+
+  if (!EC_KEY_generate_key (self->session_key))
+    {
+      fp_err ("Failed to generate key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!EC_KEY_check_key (self->session_key))
+    {
+      fp_err ("Failed to check key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  pkey = EVP_PKEY_new ();
+  peer_pkey = EVP_PKEY_new ();
+
+  if (!EVP_PKEY_set1_EC_KEY (pkey, self->session_key))
+    {
+      fp_err ("Failed to initialize session pkey, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!EVP_PKEY_set1_EC_KEY (peer_pkey, self->ecdh_q))
+    {
+      fp_err ("Failed to initialize peer pkey, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!(ctx = EVP_PKEY_CTX_new (pkey, NULL)))
+    {
+      fp_err ("Failed to initialize context, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (EVP_PKEY_derive_init (ctx) <= 0)
+    {
+      fp_err ("Failed to initialize derive, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (EVP_PKEY_derive_set_peer (ctx, peer_pkey) <= 0)
+    {
+      fp_err ("Failed to set peer key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  guint8 *pre_master_secret;
+  gulong pre_master_secret_length;
+
+  /* Determine buffer length */
+  if (EVP_PKEY_derive (ctx, NULL, &pre_master_secret_length) <= 0)
+    {
+      fp_err ("Failed to calculate derive length, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (!(pre_master_secret = g_malloc0 (pre_master_secret_length)))
+    {
+      fp_err ("Failed to allocate memory for derived key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  if (EVP_PKEY_derive (ctx, pre_master_secret, &pre_master_secret_length) <= 0)
+    {
+      fp_err ("Failed to derive key, error: %lu, %s",
+              ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
+      return;
+    }
+
+  guint8 *seed = g_malloc0 (0x20 + 0x20);
+  memcpy (seed, self->client_random, 0x20);
+  memcpy (seed + 0x20, self->server_random, 0x20);
+
+  PRF_SHA256 (pre_master_secret, pre_master_secret_length, LABEL_MASTER_SECRET, G_N_ELEMENTS (LABEL_MASTER_SECRET),
+              seed, 0x40, self->master_secret, 0x30);
+
+  g_free (pre_master_secret);
+
+  guint8 key_block[0x120];
+  PRF_SHA256 (self->master_secret, 0x30, LABEL_KEY_EXPANSION, G_N_ELEMENTS (LABEL_KEY_EXPANSION),
+              seed, 0x40, key_block, 0x120);
+
+  memcpy (self->sign_key, key_block, 0x20);
+  memcpy (self->validation_key, key_block + 0x20, 0x20);
+  memcpy (self->encryption_key, key_block + 0x40, 0x20);
+  memcpy (self->decryption_key, key_block + 0x60, 0x20);
+
+#if 0
+  fp_dbg ("sign key");
+  print_hex (self->sign_key, 0x20);
+  fp_dbg ("validation_key");
+  print_hex (self->validation_key, 0x20);
+  fp_dbg ("encryption_key");
+  print_hex (self->encryption_key, 0x20);
+  fp_dbg ("decryption_key");
+  print_hex (self->decryption_key, 0x20);
+#endif
+
+  g_free (seed);
+  EVP_PKEY_free (pkey);
+  EVP_PKEY_free (peer_pkey);
+  EVP_PKEY_CTX_free (ctx);
+}
+
+static void
+tls_parse_handshake_response (FpiDeviceVfs0097 *self)
 {
   FpiByteReader reader;
 
@@ -1200,7 +1192,7 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case TLS_HANDSHAKE_SM_CLIENT_HELLO:
-      prepare_client_hello (self, &record, &record_length);
+      tls_prepare_client_hello (self, &record, &record_length);
       handshake_command (record, record_length, &command, &command_length);
       g_free (record);
 
@@ -1209,17 +1201,17 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case TLS_HANDSHAKE_SM_SERVER_HELLO:
-      parse_handshake_response (self);
+      tls_parse_handshake_response (self);
       fpi_ssm_next_state (ssm);
       break;
 
     case TLS_HANDSHAKE_SM_MAKE_KEYS:
-      make_keys (self);
+      tls_make_keys (self);
       fpi_ssm_next_state (ssm);
       break;
 
     case TLS_HANDSHAKE_SM_CLIENT_FINISHED:
-      prepare_certificate_kex_verify (self, &record, &record_length);
+      tls_prepare_certificate_kex_verify (self, &record, &record_length);
       handshake_command (record, record_length, &command, &command_length);
       g_free (record);
 
@@ -1485,7 +1477,7 @@ get_users_db_ssm (FpiSsm *ssm, FpDevice *dev)
               for (int i = 0; i < 6; i++)
                 fpi_byte_reader_get_uint8 (&r, &auth[i]);
 
-              if (memcmp (auth, "fprint", 6) == 0)
+              if (memcmp (auth, FPRINT_AUTHORITY, G_N_ELEMENTS (FPRINT_AUTHORITY)) == 0)
                 {
                   const guint8 *username;
                   fpi_byte_reader_get_data (&r, subcnt * 4, &username);
@@ -1498,7 +1490,7 @@ get_users_db_ssm (FpiSsm *ssm, FpDevice *dev)
                       fpi_print_set_device_stored (print, TRUE);
                       fpi_print_set_type (print, FPI_PRINT_RAW);
 
-                      fp_print_set_username (print, username);
+                      fp_print_set_username (print, (gchar *) username);
                       fp_print_set_finger (print, subtype_to_finger (subtypes[i]));
                       GDateTime *dt = g_date_time_new_now_local ();
                       GDate *date = g_date_new_dmy (
@@ -1507,7 +1499,7 @@ get_users_db_ssm (FpiSsm *ssm, FpDevice *dev)
                         g_date_time_get_year (dt));
                       fp_print_set_enroll_date (print, date);
 
-                      g_date_time_unref(dt);
+                      g_date_time_unref (dt);
                       g_date_free (date);
 
                       char buf[100];
@@ -1519,8 +1511,8 @@ get_users_db_ssm (FpiSsm *ssm, FpDevice *dev)
                 }
               else
                 {
-                  gulong authority = auth[0] << 40 |
-                                     auth[1] << 32 |
+                  gulong authority = (gulong) auth[0] << 40 |
+                                     (gulong) auth[1] << 32 |
                                      auth[2] << 24 |
                                      auth[3] << 16 |
                                      auth[4] << 8  |
@@ -1598,6 +1590,7 @@ match_interrupt_cb (FpiUsbTransfer *transfer,
                     GError         *error)
 {
   gint *data = fpi_ssm_get_data (transfer->ssm);
+
   *data = -1;
 
   if (error)
@@ -1682,8 +1675,8 @@ capture_interrupt_cb (FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_dat
     }
   else
     {
-      fp_warn ("Unknown interrupt: %02x %02x %02x %02x %02x", transfer->buffer[0], transfer->buffer[1], transfer->buffer[2],
-               transfer->buffer[3], transfer->buffer[4]);
+      fp_warn ("Unknown interrupt: %02x %02x %02x %02x %02x",
+               transfer->buffer[0], transfer->buffer[1], transfer->buffer[2], transfer->buffer[3], transfer->buffer[4]);
       next_state = SCAN_FAILED;
     }
   fpi_ssm_jump_to_state (transfer->ssm, next_state);
@@ -1702,7 +1695,7 @@ capture_ssm (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case START_IDENTIFY_PROGRAM:
-      exec_command (dev, ssm, ENROLL_PROGRAM, G_N_ELEMENTS (ENROLL_PROGRAM));
+      exec_command (dev, ssm, CAPTURE_PROGRAM, G_N_ELEMENTS (CAPTURE_PROGRAM));
       break;
 
     case AWAIT_INTERRUPT:
@@ -2348,7 +2341,8 @@ dev_delete (FpDevice *device)
 static void
 dev_verify_callback (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
-  gboolean *data = fpi_ssm_get_data(ssm);
+  gboolean *data = fpi_ssm_get_data (ssm);
+
   fpi_device_verify_report (dev, (*data < 0) ? FPI_MATCH_FAIL : FPI_MATCH_SUCCESS, NULL, NULL);
   fpi_device_verify_complete (dev, NULL);
 }

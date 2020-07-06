@@ -208,6 +208,8 @@ enum CREATE_RECORD_SM {
   CREATE_RECORD_STATES
 };
 
+static const unsigned char FPRINT_AUTHORITY[6] = "fprint";
+
 /* TLS */
 static const unsigned char TLS_VERSION[] = { 0x03, 0x03 };
 
@@ -631,7 +633,7 @@ static const unsigned char IDENTIFY_PROGRAM[] = {
   0x7f
 };
 
-static const unsigned char ENROLL_PROGRAM[] = {
+static const unsigned char CAPTURE_PROGRAM[] = {
   0x02, 0x98, 0x00, 0x00, 0x00, 0x23, 0x00, 0x00,
   0x00, 0x20, 0x00, 0x08, 0x00, 0x00, 0x20, 0x00,
   0x80, 0x00, 0x00, 0x01, 0x00, 0x32, 0x00, 0x70,
