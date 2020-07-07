@@ -258,9 +258,11 @@ static void tls_parse_record (guint8   content_type,
 
 /* Initialization from device's flash */
 
-static void
+static gboolean
 init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 {
+  gboolean success = FALSE;
+
   guint8 AES_MASTER_KEY[SHA256_DIGEST_LENGTH];
   guint8 VALIDATION_KEY[SHA256_DIGEST_LENGTH];
 
@@ -274,11 +276,10 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
               SIGN_KEY, G_N_ELEMENTS (SIGN_KEY),
               VALIDATION_KEY, SHA256_DIGEST_LENGTH);
 
-  const guint8 prefix = body[0];
-  if (prefix != 2)
+  if (body[0] != 2)
     {
-      fp_warn ("Unknown private key prefix %02x", prefix);
-      return;
+      fp_warn ("Unknown private key prefix %02x", body[0]);
+      goto exit;
     }
 
   const guint8 *encrypted = &body[1];
@@ -290,7 +291,7 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
   if (memcmp (calc_hash, hash, SHA256_DIGEST_LENGTH) != 0)
     {
       fp_warn ("Signature verification failed. This device was probably paired with another computer.");
-      return;
+      goto exit;
     }
 
   EVP_CIPHER_CTX *context;
@@ -302,7 +303,7 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
     {
       fp_err ("Failed to initialize EVP decrypt, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
+      goto exit;
     }
 
   decrypted = g_malloc (0x70);
@@ -312,17 +313,15 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
     {
       fp_err ("Failed to EVP decrypt, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
+      goto exit;
     }
 
   if (!EVP_DecryptFinal (context, decrypted + tlen1, &tlen2))
     {
       fp_err ("EVP Final decrypt failed, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
+      goto exit;
     }
-
-  EVP_CIPHER_CTX_free (context);
 
   BIGNUM *x = BN_lebin2bn (decrypted, 0x20, NULL);
   BIGNUM *y = BN_lebin2bn (decrypted + 0x20, 0x20, NULL);
@@ -334,7 +333,7 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
     {
       fp_err ("Failed to set public key coordinates, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
+      goto exit;
     }
 
   if (!EC_KEY_set_private_key (key, d))
@@ -342,25 +341,30 @@ init_private_key (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
       fp_err ("Failed to set private key, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
 
-      return;
+      goto exit;
     }
 
   if (!EC_KEY_check_key (key))
     {
       fp_err ("Failed to check key, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
+      goto exit;
     }
 
   self->private_key = key;
+  success = TRUE;
 
+exit:
+  g_clear_pointer (&context, EVP_CIPHER_CTX_free);
   g_clear_pointer (&decrypted, g_free);
   g_clear_pointer (&x, BN_free);
   g_clear_pointer (&y, BN_free);
   g_clear_pointer (&d, BN_free);
+
+  return success;
 }
 
-static void
+static gboolean
 init_ecdh (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 {
   FpiByteReader *reader;
@@ -384,7 +388,7 @@ init_ecdh (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
     {
       fp_err ("Failed to set public key coordinates, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
+      return FALSE;
     }
 
   g_clear_pointer (&x, BN_free);
@@ -417,7 +421,7 @@ init_ecdh (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
     {
       fp_err ("Failed to set public key coordinates, error: %lu, %s",
               ERR_peek_last_error (), ERR_error_string (ERR_peek_last_error (), NULL));
-      return;
+      return FALSE;
     }
 
   guint8 dgst[SHA256_DIGEST_LENGTH];
@@ -434,6 +438,8 @@ init_ecdh (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
   g_clear_pointer (&device_key, EC_KEY_free);
   g_clear_pointer (&x, BN_free);
   g_clear_pointer (&y, BN_free);
+
+  return verify_status > 0;
 }
 
 static void
@@ -445,11 +451,17 @@ init_certificate (FpiDeviceVfs0097 *self, const guint8 *body, guint16 size)
 }
 
 static void
-init_keys (FpDevice *dev)
+init_keys (FpDevice *dev, FpiSsm *ssm)
 {
   FpiByteReader reader;
   FpiDeviceVfs0097 *self = FPI_DEVICE_VFS0097 (dev);
   guint32 size;
+
+  guint16 id, body_size;
+  const guint8 *hash;
+  const guint8 *body;
+
+  guint8 calc_hash[SHA256_DIGEST_LENGTH];
 
   fpi_byte_reader_init (&reader, self->buffer, self->buffer_length);
   fpi_byte_reader_skip (&reader, 2);
@@ -457,10 +469,6 @@ init_keys (FpDevice *dev)
   fpi_byte_reader_skip (&reader, 2);
 
   g_assert (fpi_byte_reader_get_remaining (&reader) == size);
-
-  guint16 id, body_size;
-  const guint8 *hash;
-  const guint8 *body;
 
   while (fpi_byte_reader_get_remaining_inline (&reader) > 0)
     {
@@ -473,13 +481,13 @@ init_keys (FpDevice *dev)
       fpi_byte_reader_get_data (&reader, SHA256_DIGEST_LENGTH, &hash);
       fpi_byte_reader_get_data (&reader, body_size, &body);
 
-      guint8 calc_hash[SHA256_DIGEST_LENGTH];
       SHA256 (body, body_size, calc_hash);
 
       if (memcmp (calc_hash, hash, SHA256_DIGEST_LENGTH) != 0)
         {
           fp_warn ("Hash mismatch for block %d", id);
-          continue;
+          fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+          return;
         }
 
       switch (id)
@@ -495,7 +503,8 @@ init_keys (FpDevice *dev)
           break;
 
         case 4:
-          init_private_key (self, body, body_size);
+          if (!init_private_key (self, body, body_size))
+            goto err;
           break;
 
         case 6:
@@ -503,10 +512,16 @@ init_keys (FpDevice *dev)
           break;
 
         default:
-          fp_warn ("Unhandled block id %04x (%d bytes)", id, body_size);
+          fp_info ("Unhandled block id %04x (%d bytes)", id, body_size);
           break;
         }
     }
+
+  fpi_ssm_next_state (ssm);
+  return;
+
+err:
+  fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
 }
 
 /* SSM for exec_command */
@@ -1269,9 +1284,7 @@ init_ssm (FpiSsm *ssm, FpDevice *dev)
           if (self->buffer[self->buffer_length - 1] != 0x07)
             {
               fp_err ("Sensor is not initialized, init byte is 0x%02x "
-                      "(should be 0x07 on initialized devices, 0x02 otherwise)\n" \
-                      "This is a driver in alpha state and the device needs to be setup in a VirtualBox " \
-                      "instance running Windows, or with a native Windows installation first.",
+                      "(should be 0x07 on initialized devices, 0x02 otherwise).\n",
                       self->buffer[self->buffer_length - 1]);
               fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
                                                                   "Device is not initialized"));
@@ -1280,7 +1293,7 @@ init_ssm (FpiSsm *ssm, FpDevice *dev)
         }
       else
         {
-          fp_warn ("Unknown reply at init");
+          fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Unknown reply at init"));
           break;
         }
 
@@ -1305,8 +1318,7 @@ init_ssm (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case INIT_KEYS:
-      init_keys (dev);
-      fpi_ssm_next_state (ssm);
+      init_keys (dev, ssm);
       break;
 
     case HANDSHAKE:
