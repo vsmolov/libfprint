@@ -2379,28 +2379,31 @@ dev_cancel (FpDevice *device)
   self->interrupt_cancellable = g_cancellable_new ();
 }
 
-static guint
-read_dmi (const char *filename, char *buffer, int buffer_len)
+static gchar *
+read_dmi (const char *filename)
 {
   FILE *file;
-  size_t read;
+  gsize length;
+  gchar buffer[1024];
 
   if (!(file = fopen (filename, "r")))
     {
-      g_warning ("Could not read %s", filename);
-      buffer[0] = 0;
-      return 0;
+      g_warning ("Could not open DMI node: %s", filename);
+      goto exit;
     }
 
-  fgets (buffer, buffer_len, file);
+  fgets (buffer, G_N_ELEMENTS (buffer), file);
+  if ((length = strlen (buffer)) == 0)
+    {
+      g_warning ("Could not read DMI node value: %s", filename);
+      goto exit;
+    }
+  buffer[length - 1] = 0; // Remove newline
 
-  read = strlen (buffer);
-  g_assert (read > 0);
-  read--;
-
-  // Remove newline
-  buffer[read] = 0;
-  return read;
+exit:
+  if (file)
+    fclose (file);
+  return g_strdup (buffer);
 }
 
 static void
@@ -2413,21 +2416,17 @@ fpi_device_vfs0097_init (FpiDeviceVfs0097 *self)
 
 // TODO: Device is initialized via VirtualBox, so real HW id is not useful for now
 
-//  char name[1024], serial[1024];
-//  guint name_len, serial_len;
+//  gchar *name, *serial;
+//  name = read_dmi (DMI_PRODUCT_NAME_NODE);
+//  serial = read_dmi (DMI_PRODUCT_SERIAL_NODE);
 //
-//  name_len = read_dmi ("/sys/class/dmi/id/product_name", name, sizeof (name));
-//  serial_len = read_dmi ("/sys/class/dmi/id/product_serial", serial, sizeof (serial));
+//  self->seed = g_malloc0 (strlen (name) + strlen (serial) + 2);
 //
-//  if (name_len == 0)
-//    {
-//      // Set system id to default value (i.e. "VirtualBox")
-//    }
+//  strcpy ((gchar *) self->seed, name);
+//  strcpy ((gchar *) self->seed + strlen (name) + 1, serial);
 //
-//  self->seed = g_malloc0 (name_len + serial_len + 2);
-//
-//  memcpy (self->seed, name, name_len + 1);
-//  memcpy (self->seed + name_len + 1, serial, serial_len + 1);
+//  g_free (name);
+//  g_free (serial);
 
   g_debug ("Initialized seed value: %s", self->seed);
 }
