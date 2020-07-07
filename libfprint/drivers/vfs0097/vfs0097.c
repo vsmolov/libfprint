@@ -1509,30 +1509,6 @@ get_users_db_ssm (FpiSsm *ssm, FpDevice *dev)
                       g_ptr_array_add (self->list_result, g_object_ref_sink (print));
                     }
                 }
-              else
-                {
-                  gulong authority = (gulong) auth[0] << 40 |
-                                     (gulong) auth[1] << 32 |
-                                     auth[2] << 24 |
-                                     auth[3] << 16 |
-                                     auth[4] << 8  |
-                                     auth[5];
-
-                  guint *subauth = g_malloc0_n (subcnt, sizeof (guint));
-                  for (int i = 0; i < subcnt; i++)
-                    fpi_byte_reader_get_uint32_le (&r, &subauth[i]);
-
-                  gchar buffer[100] = { 0 };
-                  for (int i = 0, l = 0; i < subcnt; i++)
-                    {
-                      sprintf (&buffer[l], "%u-", subauth[i]);
-                      l = strlen (buffer);
-                    }
-
-                  g_free (subauth);
-
-                  fp_dbg ("SID: S-%d-%ld-%s", revision, authority, buffer);
-                }
             }
           else
             {
