@@ -211,6 +211,7 @@ enum CREATE_RECORD_SM {
 };
 
 static const unsigned char FPRINT_AUTHORITY[6] = "fprint";
+static const unsigned char VIRTUAL_BOX_SEED[] = "VirtualBox\0" "0";
 
 /* TLS */
 static const unsigned char TLS_VERSION[] = { 0x03, 0x03 };

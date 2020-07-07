@@ -2210,10 +2210,9 @@ dev_open (FpDevice *device)
 
   self->tls = FALSE;
 
-  guint8 seed[] = "VirtualBox\0" "0";
-  self->seed_length = G_N_ELEMENTS (seed);
-  self->seed = g_malloc0 (G_N_ELEMENTS (seed));
-  memcpy (self->seed, seed, G_N_ELEMENTS (seed));
+  self->seed_length = G_N_ELEMENTS (VIRTUAL_BOX_SEED);
+  self->seed = g_malloc0 (G_N_ELEMENTS (VIRTUAL_BOX_SEED));
+  memcpy (self->seed, VIRTUAL_BOX_SEED, G_N_ELEMENTS (VIRTUAL_BOX_SEED));
 
   if (!self->seed)
     {
@@ -2408,11 +2407,9 @@ static void
 fpi_device_vfs0097_init (FpiDeviceVfs0097 *self)
 {
 //  g_assert (FALSE);
-  guint8 seed[] = "VirtualBox\0" "0";
-
-  self->seed_length = G_N_ELEMENTS (seed);
-  self->seed = g_malloc0 (G_N_ELEMENTS (seed));
-  memcpy (self->seed, seed, G_N_ELEMENTS (seed));
+  self->seed_length = G_N_ELEMENTS (VIRTUAL_BOX_SEED);
+  self->seed = g_malloc0 (G_N_ELEMENTS (VIRTUAL_BOX_SEED));
+  memcpy (self->seed, VIRTUAL_BOX_SEED, G_N_ELEMENTS (VIRTUAL_BOX_SEED));
 
 // TODO: Device is initialized via VirtualBox, so real HW id is not useful for now
 
