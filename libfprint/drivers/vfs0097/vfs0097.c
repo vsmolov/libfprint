@@ -157,7 +157,7 @@ await_interrupt (FpDevice *dev, FpiSsm *ssm, FpiUsbTransferCallback callback)
   transfer->ssm = ssm;
   fpi_usb_transfer_fill_interrupt (transfer, EP_INTERRUPT, USB_INTERRUPT_DATA_SIZE);
   fpi_usb_transfer_submit (transfer,
-                           0,
+                           VFS_INT_TIMEOUT,
                            self->interrupt_cancellable,
                            callback,
                            NULL);
@@ -1631,11 +1631,12 @@ capture_interrupt_cb (FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_dat
 {
   if (error)
     {
-      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
+          g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT))
         {
-          g_error_free (error);
-//      fpi_ssm_jump_to_state (transfer->ssm, SCAN_FAILED);
           fpi_ssm_mark_failed (transfer->ssm, error);
+//          g_error_free (error);
+//          fpi_ssm_jump_to_state (transfer->ssm, SCAN_FAILED);
           return;
         }
 

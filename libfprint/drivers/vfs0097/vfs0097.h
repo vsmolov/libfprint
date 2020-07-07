@@ -28,6 +28,8 @@
 
 /* Timeout for all send/recv operations, except interrupt waiting and abort */
 #define VFS_USB_TIMEOUT 500
+/* Timeout for interrupt waiting and abort */
+#define VFS_INT_TIMEOUT 10000
 /* Timeout for usb abort */
 #define VFS_USB_ABORT_TIMEOUT 20
 /* Default timeout for SSM timers */
